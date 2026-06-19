@@ -624,9 +624,11 @@
     let tvSeasons = {}; // cached tv seasons details to construct selectors
 
     // Determine API Base URL dynamically.
-    // If the HTML page is run via VS Code Live Server (port 5500), route requests to the backend (port 3000).
-    // Otherwise, route queries relatively.
-    const API_BASE = window.location.port === '5500' ? 'http://localhost:3000' : '';
+    // When running locally (on localhost, 127.0.0.1, or port 5500), route requests to the production Render API.
+    // Otherwise, route queries relatively (e.g. when deployed on Render).
+    const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '5500'
+      ? 'https://moviezon-api.onrender.com'
+      : '';
 
     // On page load, pull initial items
     window.addEventListener('DOMContentLoaded', () => {
