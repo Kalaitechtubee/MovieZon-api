@@ -6,6 +6,7 @@ const morgan = require('morgan');
 const config = require('../config');
 const logger = require('../logger');
 const apiRoutes = require('../routes/api');
+const apiController = require('../controllers/apiController');
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use(morgan(morganFormat, {
 
 // API Routes
 app.use('/api', apiRoutes);
+app.get('/health', apiController.health);
 
 // 404 handler
 app.use((req, res, next) => {

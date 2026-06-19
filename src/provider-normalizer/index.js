@@ -6,6 +6,24 @@ const logger = require('../logger');
 function normalizeCatalogItem(data, providerName) {
   if (!data) return null;
 
+  const isTv = data.type === 'tv' || data.mediaType === 'tv';
+  const mediaType = isTv ? 'tv' : 'movie';
+
+  let ratingVal = data.rating;
+  let ratingStr = 'TMDB 0.0';
+  if (ratingVal) {
+    if (typeof ratingVal === 'string') {
+      const match = ratingVal.match(/[\d.]+/);
+      if (match) {
+        ratingStr = `TMDB ${parseFloat(match[0]).toFixed(1)}`;
+      } else {
+        ratingStr = ratingVal;
+      }
+    } else if (typeof ratingVal === 'number') {
+      ratingStr = `TMDB ${ratingVal.toFixed(1)}`;
+    }
+  }
+
   return {
     id: String(data.tmdbId || data.id),
     provider: providerName.toLowerCase(),
@@ -14,14 +32,15 @@ function normalizeCatalogItem(data, providerName) {
     title: data.title || '',
     originalTitle: data.originalTitle || data.title || '',
     year: data.year ? parseInt(data.year, 10) : null,
-    type: data.type === 'tv' ? 'tv' : 'movie',
+    type: mediaType,
+    mediaType: mediaType,
     language: data.language || data.originalLanguage || 'en',
-    quality: data.quality || '1080p', // standard default
+    quality: data.quality || '1080p',
     poster: data.poster || '',
     backdrop: data.backdrop || '',
     overview: data.overview || '',
     duration: data.duration ? parseInt(data.duration, 10) : (data.runtime ? parseInt(data.runtime, 10) : null),
-    rating: data.rating ? parseFloat(data.rating) : null
+    rating: ratingStr
   };
 }
 

@@ -3,6 +3,7 @@ const providerManager = require('../provider-manager');
 const healthService = require('../provider-health');
 const logger = require('../logger');
 const config = require('../config');
+const { normalizeCatalogItem } = require('../provider-normalizer');
 
 /**
  * Fetch movie/TV details from TMDB with cast, genres, and trailers appended
@@ -10,7 +11,7 @@ const config = require('../config');
 async function fetchTmdbDetails(id, type) {
   const { baseUrl, apiKey } = config.tmdb;
   const pathType = type.toLowerCase() === 'tv' ? 'tv' : 'movie';
-  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos`;
+  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos,recommendations`;
 
   try {
     const response = await axios.get(url, { timeout: 5000 });
@@ -30,33 +31,60 @@ async function fetchTmdbDetails(id, type) {
     }));
     
     const genres = (data.genres || []).map(g => g.name);
+    const genreStr = genres.join(', ');
+
+    // Parse director from crew
+    const crew = data.credits?.crew || [];
+    const directorObj = crew.find(c => c.job === 'Director');
+    const director = directorObj ? directorObj.name : '';
     
     // Find YouTube Trailer key
-    const trailer = (data.videos?.results || []).find(
+    const trailerKey = (data.videos?.results || []).find(
       v => v.type === 'Trailer' && v.site === 'YouTube'
     )?.key || null;
+    const trailer = trailerKey ? `https://www.youtube.com/watch?v=${trailerKey}` : null;
 
     const seasons = (data.seasons || []).map(s => ({
       seasonNumber: s.season_number,
+      season_number: s.season_number,
       episodeCount: s.episode_count,
+      episode_count: s.episode_count,
       name: s.name || `Season ${s.season_number}`
-    })).filter(s => s.seasonNumber > 0);
+    })).filter(s => s.season_number > 0);
+
+    const recommendations = (data.recommendations?.results || []).slice(0, 10).map(r => ({
+      id: r.id,
+      title: r.title || r.name || 'Unknown',
+      posterPath: r.poster_path ? `https://image.tmdb.org/t/p/w185${r.poster_path}` : null,
+      mediaType: r.media_type || (r.first_air_date ? 'tv' : 'movie')
+    }));
+
+    const ratingVal = data.vote_average ? `TMDB ${data.vote_average.toFixed(1)}` : 'TMDB 0.0';
 
     return {
+      id: String(data.id),
+      provider: 'tmdb',
       tmdbId: data.id,
       title,
       originalTitle,
       overview: data.overview || '',
+      description: data.overview || '',
       poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
       backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
-      year,
-      rating: data.vote_average || 0,
+      year: year ? String(year) : '',
+      rating: ratingVal,
       genres,
+      genre: genreStr,
       duration: runtime,
       language: data.original_language || 'en',
       cast,
+      director,
       trailer,
-      seasons
+      seasons,
+      recommendations,
+      mediaType: pathType,
+      languages: [],
+      sources: []
     };
   } catch (err) {
     logger.warn(`Failed to fetch TMDB details for ${type} ID ${id}: ${err.message}`);
@@ -78,29 +106,19 @@ async function searchTmdb(query) {
     return results
       .filter(item => ['movie', 'tv'].includes(item.media_type))
       .map(item => {
-        const title = item.title || item.name || 'Unknown Title';
-        const originalTitle = item.original_title || item.original_name || title;
-        const releaseDate = item.release_date || item.first_air_date || '';
-        const year = releaseDate ? new Date(releaseDate).getFullYear() : null;
-        
-        return {
-          id: String(item.id),
-          provider: 'tmdb',
+        return normalizeCatalogItem({
           tmdbId: item.id,
-          imdbId: null,
-          title,
-          originalTitle,
-          year,
+          id: String(item.id),
+          title: item.title || item.name,
+          originalTitle: item.original_title || item.original_name,
+          year: item.release_date || item.first_air_date ? new Date(item.release_date || item.first_air_date).getFullYear() : null,
           type: item.media_type,
-          language: item.original_language || 'en',
-          quality: '1080p',
+          rating: item.vote_average,
           poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
           backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null,
           overview: item.overview || '',
-          duration: null,
-          rating: item.vote_average || 0,
-          providers: []
-        };
+          language: item.original_language || 'en'
+        }, 'tmdb');
       });
   } catch (err) {
     logger.warn(`Failed to search TMDB for "${query}": ${err.message}`);
@@ -138,8 +156,10 @@ const apiController = {
 
       res.json({
         ok: true,
+        success: true,
         count: items.length,
-        items
+        items,
+        results: items
       });
     } catch (err) {
       next(err);
@@ -153,18 +173,48 @@ const apiController = {
     try {
       const { provider, id } = req.params;
       const { type } = req.query;
+      const parsedType = type || 'movie';
 
-      if (!type || !['movie', 'tv'].includes(type.toLowerCase())) {
+      if (!parsedType || !['movie', 'tv'].includes(parsedType.toLowerCase())) {
         return res.status(400).json({
           error: 'Bad Request',
           message: 'Query parameter "type" must be "movie" or "tv".'
         });
       }
 
-      const details = await providerManager.details(provider, id, type.toLowerCase());
+      let details = null;
+      try {
+        details = await providerManager.details(provider, id, parsedType.toLowerCase());
+      } catch (err) {
+        logger.warn(`Could not retrieve details for provider ${provider} ID ${id}: ${err.message}`);
+      }
+      
+      if (details) {
+        details.id = details.id || String(details.tmdbId || id);
+        details.provider = details.provider || provider;
+        details.mediaType = details.mediaType || details.type || parsedType.toLowerCase();
+        details.description = details.description || details.overview || '';
+        details.overview = details.overview || details.description || '';
+        details.genre = details.genre || (Array.isArray(details.genres) ? details.genres.join(', ') : '');
+        details.genres = details.genres || (details.genre ? details.genre.split(',').map(g => g.trim()) : []);
+        
+        if (details.rating && typeof details.rating === 'number') {
+          details.rating = `TMDB ${details.rating.toFixed(1)}`;
+        }
+        details.sources = details.sources || [];
+      } else {
+        return res.status(404).json({
+          success: false,
+          error: 'Not Found',
+          message: `Details for provider ${provider} ID ${id} not found.`
+        });
+      }
+
       res.json({
         ok: true,
-        details
+        success: true,
+        details,
+        results: details
       });
     } catch (err) {
       next(err);
@@ -224,9 +274,9 @@ const apiController = {
               cast: [],
               trailer: null,
               seasons: isTv ? [
-                { seasonNumber: 2, episodeCount: 9, name: 'Season 2' },
-                { seasonNumber: 3, episodeCount: 8, name: 'Season 3' },
-                { seasonNumber: 5, episodeCount: 8, name: 'Season 5' }
+                { seasonNumber: 2, season_number: 2, episodeCount: 9, episode_count: 9, name: 'Season 2' },
+                { seasonNumber: 3, season_number: 3, episodeCount: 8, episode_count: 8, name: 'Season 3' },
+                { seasonNumber: 5, season_number: 5, episodeCount: 8, episode_count: 8, name: 'Season 5' }
               ] : []
             };
           }
@@ -242,10 +292,80 @@ const apiController = {
         });
       }
 
+      // Format properties for client compliance
+      finalDetails.id = finalDetails.id || String(finalDetails.tmdbId || id);
+      finalDetails.provider = finalDetails.provider || 'tmdb';
+      finalDetails.mediaType = finalDetails.mediaType || type.toLowerCase();
+      finalDetails.description = finalDetails.description || finalDetails.overview || '';
+      finalDetails.overview = finalDetails.overview || finalDetails.description || '';
+      finalDetails.genre = finalDetails.genre || (Array.isArray(finalDetails.genres) ? finalDetails.genres.join(', ') : '');
+      finalDetails.genres = finalDetails.genres || (finalDetails.genre ? finalDetails.genre.split(',').map(g => g.trim()) : []);
+
+      if (finalDetails.rating && typeof finalDetails.rating === 'number') {
+        finalDetails.rating = `TMDB ${finalDetails.rating.toFixed(1)}`;
+      }
+
+      // Map provider availability check results to V2 sources array
+      const sources = [];
+      if (availability && Array.isArray(availability.providers)) {
+        availability.providers.forEach(p => {
+          if (p.status === 'available') {
+            if (p.streamType === 'embed' && p.embedUrl) {
+              // Peachify / iframe embed providers (Server 2)
+              sources.push({
+                provider: p.name,
+                id: String(id),
+                languages: ['Original Audio'],
+                label: 'Server 2 (Peachify)',
+                streamType: 'embed'
+              });
+            } else if (p.variants && p.variants.length > 0) {
+              p.variants.forEach(v => {
+                sources.push({
+                  provider: p.name,
+                  id: v.id, // dubSubjectId
+                  languages: [v.language]
+                });
+              });
+            } else {
+              sources.push({
+                provider: p.name,
+                id: String(id),
+                languages: ['Original Audio']
+              });
+            }
+          }
+        });
+      }
+
+      finalDetails.sources = sources;
+
+      // --- SERVER 2 (PEACHIFY) SAFETY NET ---
+      // If Peachify wasn't already added via availability check (e.g. timed out),
+      // add it manually as Server 2 when NetMirror has no stream.
+      const hasNetmirrorSource = sources.some(s => s.provider === 'netmirror');
+      const hasPeachifySource = sources.some(s => s.provider === 'peachify');
+      if (!hasNetmirrorSource && !hasPeachifySource) {
+        logger.info(`[UnifiedDetails] No NetMirror stream for ID ${id}. Adding Peachify (Server 2) as safety-net source.`);
+        sources.push({
+          provider: 'peachify',
+          id: String(id),
+          languages: ['Original Audio'],
+          label: 'Server 2 (Peachify)',
+          streamType: 'embed'
+        });
+        finalDetails.sources = sources;
+      }
+
+
+
       res.json({
         ok: true,
+        success: true,
         movie: finalDetails,
-        availability
+        details: finalDetails,
+        availability,
+        results: finalDetails
       });
     } catch (err) {
       next(err);
@@ -260,16 +380,30 @@ const apiController = {
       const { provider, id } = req.params;
       const { type, season, episode, variant } = req.query;
 
-      if (!type || !['movie', 'tv'].includes(type.toLowerCase())) {
+      let parsedId = id;
+      let parsedType = type || 'movie';
+      let parsedSeason = season;
+      let parsedEpisode = episode;
+
+      // Handle TV show composite IDs (e.g. 71912-1-2)
+      const tvMatch = String(id).match(/^(\d+)[-:](\d+)[-:](\d+)$/);
+      if (tvMatch) {
+        parsedId = tvMatch[1];
+        parsedType = 'tv';
+        parsedSeason = tvMatch[2];
+        parsedEpisode = tvMatch[3];
+      }
+
+      if (!parsedType || !['movie', 'tv'].includes(parsedType.toLowerCase())) {
         return res.status(400).json({
           error: 'Bad Request',
           message: 'Query parameter "type" must be "movie" or "tv".'
         });
       }
 
-      const isTv = type.toLowerCase() === 'tv';
-      const seasonNum = season ? parseInt(season, 10) : 1;
-      const episodeNum = episode ? parseInt(episode, 10) : 1;
+      const isTv = parsedType.toLowerCase() === 'tv';
+      const seasonNum = parsedSeason ? parseInt(parsedSeason, 10) : 1;
+      const episodeNum = parsedEpisode ? parseInt(parsedEpisode, 10) : 1;
 
       if (isTv && (isNaN(seasonNum) || isNaN(episodeNum))) {
         return res.status(400).json({
@@ -285,18 +419,75 @@ const apiController = {
         ? req.headers['x-forwarded-for'].split(',')[0].trim()
         : req.socket.remoteAddress);
 
-      const streamInfo = await providerManager.stream(
-        provider,
-        id,
-        type.toLowerCase(),
-        seasonNum,
-        episodeNum,
-        variant || null,
-        clientIp
-      );
+      let streamInfo = null;
+      try {
+        streamInfo = await providerManager.stream(
+          provider,
+          parsedId,
+          parsedType.toLowerCase(),
+          seasonNum,
+          episodeNum,
+          variant || null,
+          clientIp
+        );
+      } catch (err) {
+        logger.warn(`Could not retrieve stream for provider ${provider} ID ${parsedId}: ${err.message}`);
+      }
+
+      if (!streamInfo) {
+        return res.status(404).json({
+          success: false,
+          error: 'Not Found',
+          message: `Stream for provider ${provider} ID ${id} not found.`,
+          streams: [],
+          subtitles: []
+        });
+      }
+
+      // Proxy stream URLs to bypass CORS and Referer restrictions
+      const proxyBase = `http://localhost:${config.port}/api/v2/stream/proxy`;
+      const proxyUrl = (originalUrl) => {
+        if (!originalUrl) return '';
+        if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) {
+          return originalUrl;
+        }
+        return `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
+      };
+
+      if (streamInfo.streamUrl) {
+        streamInfo.streamUrl = proxyUrl(streamInfo.streamUrl);
+      }
+      if (streamInfo.qualities && Array.isArray(streamInfo.qualities)) {
+        streamInfo.qualities = streamInfo.qualities.map(q => ({
+          ...q,
+          url: proxyUrl(q.url)
+        }));
+      }
+
+      // For embed-type streams (e.g. Peachify), return the embed URL directly
+      // No CORS proxy needed — the frontend renders these in an <iframe>
+      const isEmbed = streamInfo.streamType === 'embed' && streamInfo.embedUrl;
+      if (isEmbed) {
+        return res.json({
+          ok: true,
+          success: true,
+          provider: provider.toLowerCase(),
+          subjectId: id,
+          streamType: 'embed',
+          embedUrl: streamInfo.embedUrl,
+          streams: [],
+          subtitles: [],
+          stream: streamInfo
+        });
+      }
 
       res.json({
         ok: true,
+        success: true,
+        provider: provider.toLowerCase(),
+        subjectId: id, // return original id string to match frontend validation
+        streams: streamInfo.qualities || [],
+        subtitles: streamInfo.subtitles || [],
         stream: streamInfo
       });
     } catch (err) {
@@ -354,6 +545,138 @@ const apiController = {
       },
       providers: providersHealth
     });
+  },
+
+  /**
+   * GET /api/v2/tmdb/:category
+   * Proxies TMDB catalog list requests (trending, popular, discover, etc.)
+   */
+  async tmdbList(req, res, next) {
+    try {
+      const { category } = req.params;
+      const { baseUrl, apiKey } = config.tmdb;
+      
+      let url = '';
+      
+      if (category === 'trending') {
+        const media = req.query.media || 'all';
+        const time = req.query.time || 'week';
+        url = `${baseUrl}/trending/${media}/${time}?api_key=${apiKey}`;
+      } else if (category === 'popular') {
+        url = `${baseUrl}/movie/popular?api_key=${apiKey}`;
+      } else if (category === 'popular_tv') {
+        url = `${baseUrl}/tv/popular?api_key=${apiKey}`;
+      } else if (category === 'top_rated') {
+        const isTv = req.query.type === 'tv';
+        url = isTv ? `${baseUrl}/tv/top_rated?api_key=${apiKey}` : `${baseUrl}/movie/top_rated?api_key=${apiKey}`;
+      } else if (category === 'upcoming') {
+        url = `${baseUrl}/movie/upcoming?api_key=${apiKey}`;
+      } else if (category === 'discover') {
+        const isTv = req.query.type === 'tv';
+        url = isTv ? `${baseUrl}/discover/tv?api_key=${apiKey}` : `${baseUrl}/discover/movie?api_key=${apiKey}`;
+      } else {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: `Unsupported TMDB list category: ${category}`
+        });
+      }
+
+      // Forward other query parameters to TMDB
+      const urlObj = new URL(url);
+      Object.keys(req.query).forEach(key => {
+        if (!['media', 'time', 'type'].includes(key)) {
+          urlObj.searchParams.set(key, req.query[key]);
+        }
+      });
+
+      logger.debug(`Proxying TMDB list query for category "${category}" to: ${urlObj.toString()}`);
+      
+      const response = await axios.get(urlObj.toString(), { timeout: 5000 });
+      const results = response.data.results || [];
+      
+      // Normalize results using provider-normalizer
+      const { normalizeCatalogItem } = require('../provider-normalizer');
+      const normalizedResults = results.map(item => {
+        const isTvShow = category === 'popular_tv' || req.query.type === 'tv' || item.media_type === 'tv' || (!item.title && item.name);
+        const mediaType = isTvShow ? 'tv' : 'movie';
+        
+        return normalizeCatalogItem({
+          tmdbId: item.id,
+          id: String(item.id),
+          title: item.title || item.name,
+          originalTitle: item.original_title || item.original_name,
+          year: item.release_date || item.first_air_date ? new Date(item.release_date || item.first_air_date).getFullYear() : null,
+          type: mediaType,
+          mediaType: mediaType,
+          rating: item.vote_average,
+          poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
+          backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null,
+          overview: item.overview || '',
+          language: item.original_language || 'en'
+        }, 'tmdb');
+      });
+
+      res.json({
+        ok: true,
+        success: true,
+        results: normalizedResults
+      });
+    } catch (err) {
+      logger.warn(`Failed to retrieve TMDB list: ${err.message}`);
+      res.json({
+        ok: true,
+        success: true,
+        results: []
+      });
+    }
+  },
+
+  /**
+   * GET /api/v2/tmdb/season/:tmdbId/:seasonNumber
+   */
+  async seasonEpisodes(req, res, next) {
+    try {
+      const { tmdbId, seasonNumber } = req.params;
+      const { provider } = req.query;
+      const { baseUrl, apiKey } = config.tmdb;
+      
+      const url = `${baseUrl}/tv/${tmdbId}/season/${seasonNumber}?api_key=${apiKey}&language=en-US`;
+      logger.debug(`Fetching TV season episodes from TMDB: ${url}`);
+      
+      const response = await axios.get(url, { timeout: 5000 });
+      const episodes = response.data.episodes || [];
+      
+      const normalizedEpisodes = episodes.map(item => {
+        const compositeId = `${tmdbId}-${seasonNumber}-${item.episode_number}`;
+        const stillUrl = item.still_path ? `https://image.tmdb.org/t/p/w300${item.still_path}` : null;
+        
+        return {
+          id: compositeId,
+          provider: provider || 'netmirror',
+          episode_number: item.episode_number,
+          name: item.name || `Episode ${item.episode_number}`,
+          still_path: stillUrl,
+          still: stillUrl,
+          air_date: item.air_date || '',
+          airDate: item.air_date || '',
+          runtime: item.runtime || 0,
+          overview: item.overview || ''
+        };
+      });
+
+      res.json({
+        ok: true,
+        success: true,
+        results: normalizedEpisodes
+      });
+    } catch (err) {
+      logger.warn(`Failed to fetch season episodes: ${err.message}`);
+      res.json({
+        ok: true,
+        success: true,
+        results: []
+      });
+    }
   }
 };
 
@@ -411,6 +734,7 @@ apiController.proxyStream = async function(req, res, next) {
     });
 
     res.status(response.status);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges, Content-Disposition');
 
     const headersToCopy = [
       'content-type',

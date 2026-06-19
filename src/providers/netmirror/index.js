@@ -11,7 +11,9 @@ class NetMirrorProvider extends BaseProvider {
     super('netmirror');
     this.fallbackMap = new Map();
     this.catalogItems = new Map(); // local DB of unique titles for search
+    this.variantToTmdb = new Map(); // variant ID -> { tmdbId, type } mapping
     this.initializeCaptureData();
+    this.loadDynamicVariants();
   }
 
   /**
@@ -64,6 +66,35 @@ class NetMirrorProvider extends BaseProvider {
           const key = this.getUrlKey(req.url);
           this.fallbackMap.set(key, req.responseBody);
           indexedCount++;
+
+          // Extract variant to TMDB ID mappings
+          try {
+            const urlObj = new URL(req.url.startsWith('http') ? req.url : `https://net27.cc${req.url}`);
+            const match = urlObj.pathname.match(/\/api\/variants-tmdb\/(movie|tv)\/(\d+)/);
+            if (match) {
+              const mediaType = match[1];
+              const tmdbId = match[2];
+              const resObj = JSON.parse(req.responseBody);
+              
+              const registerVariant = (vId) => {
+                if (vId) {
+                  this.variantToTmdb.set(String(vId), { tmdbId, type: mediaType });
+                }
+              };
+
+              if (resObj.defaultSubjectId) {
+                registerVariant(resObj.defaultSubjectId);
+              }
+              if (resObj.variants && Array.isArray(resObj.variants)) {
+                resObj.variants.forEach(v => {
+                  registerVariant(v.dubSubjectId);
+                  registerVariant(v.id);
+                });
+              }
+            }
+          } catch (e) {
+            // ignore malformed URLs or JSON
+          }
 
           // Extract search items
           try {
@@ -191,7 +222,17 @@ class NetMirrorProvider extends BaseProvider {
   async stream(id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
     logger.debug(`[NetMirror] stream() called for ID: ${id}, Type: ${type}, Season: ${season}, Episode: ${episode}, Variant: ${variantId}, Client IP: ${clientIp}`);
     
-    const variantsUrl = `${config.netmirror.baseUrl}/api/variants-tmdb/${type}/${id}?se=${season}&ep=${episode}`;
+    let resolvedId = id;
+    let resolvedType = type;
+    const mapping = this.variantToTmdb.get(String(id));
+    if (mapping) {
+      resolvedId = mapping.tmdbId;
+      resolvedType = mapping.type || type;
+      variantId = id; // use the original variant ID that was passed as Route ID
+      logger.info(`[NetMirror] Resolved variant/dub ID ${id} -> TMDB ID ${resolvedId} (${resolvedType})`);
+    }
+
+    const variantsUrl = `${config.netmirror.baseUrl}/api/variants-tmdb/${resolvedType}/${resolvedId}?se=${season}&ep=${episode}`;
     let variantsData = null;
 
     // Construct headers for forwarding client IP to avoid IP-mismatched signatures
@@ -206,13 +247,72 @@ class NetMirrorProvider extends BaseProvider {
     // 1. Get variants
     try {
       variantsData = await httpClient.get(variantsUrl, requestOptions);
+
+      // Treat empty or missing variants array as a lookup failure → fall back to capture
+      const liveVariants = variantsData && variantsData.variants;
+      if (!variantsData || !variantsData.ok || !liveVariants || liveVariants.length === 0) {
+        throw new Error(`Live API returned empty variants list for ID ${resolvedId}`);
+      }
     } catch (err) {
-      logger.warn(`[NetMirror] Live request failed for variants. Falling back to capture. Error: ${err.message}`);
+      logger.warn(`[NetMirror] Live variants lookup failed or returned empty. Falling back to capture. Reason: ${err.message}`);
       variantsData = this.getCapturedResponse(variantsUrl);
     }
 
     if (!variantsData || !variantsData.ok) {
-      throw new Error(`Could not retrieve variants for ID ${id} (Season ${season}, Episode ${episode})`);
+      // --- DIRECT EMBED FALLBACK ---
+      // Some titles (e.g. Amaran/927342) have variants:[] on net27.cc but are still
+      // streamable via a direct embed-tmdb call (served through Peachify or similar).
+      logger.info(`[NetMirror] No variants for ID ${resolvedId}. Attempting direct embed without variant...`);
+      const directEmbedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}`;
+      let directEmbedData = null;
+
+      try {
+        directEmbedData = await httpClient.get(directEmbedUrl, requestOptions);
+        if (!directEmbedData || !directEmbedData.ok) {
+          throw new Error('Direct embed returned non-ok');
+        }
+      } catch (err) {
+        logger.warn(`[NetMirror] Direct embed live request failed. Trying capture. Reason: ${err.message}`);
+        directEmbedData = this.getCapturedResponse(directEmbedUrl);
+      }
+
+      if (directEmbedData && directEmbedData.ok) {
+        logger.info(`[NetMirror] Direct embed succeeded for ID ${resolvedId}`);
+        const normalized = normalizeNetMirrorStream(directEmbedData);
+        if (normalized) {
+          normalized.variants = [];
+        }
+        return normalized;
+      }
+
+      throw new Error(`Could not retrieve variants for ID ${resolvedId} (Season ${season}, Episode ${episode})`);
+    }
+
+    // Dynamically register live variants to TMDB ID map
+    try {
+      let registeredAny = false;
+      const registerVariant = (vId) => {
+        if (vId && !this.variantToTmdb.has(String(vId))) {
+          this.variantToTmdb.set(String(vId), { tmdbId: resolvedId, type: resolvedType });
+          registeredAny = true;
+        }
+      };
+
+      if (variantsData.defaultSubjectId) {
+        registerVariant(variantsData.defaultSubjectId);
+      }
+      if (variantsData.variants && Array.isArray(variantsData.variants)) {
+        variantsData.variants.forEach(v => {
+          registerVariant(v.dubSubjectId);
+          registerVariant(v.id);
+        });
+      }
+
+      if (registeredAny) {
+        this.saveDynamicVariants();
+      }
+    } catch (e) {
+      logger.debug(`[NetMirror] Failed to dynamically register variants: ${e.message}`);
     }
 
     // 2. Select target variant ID
@@ -232,13 +332,13 @@ class NetMirrorProvider extends BaseProvider {
     }
 
     if (!targetVariant) {
-      throw new Error(`No stream variants available for ID ${id}`);
+      throw new Error(`No stream variants available for ID ${resolvedId}`);
     }
 
     logger.debug(`[NetMirror] Selected variant ID: ${targetVariant}`);
 
     // 3. Get stream embed details
-    const embedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${id}?type=${type}&se=${season}&ep=${episode}&dub=${targetVariant}`;
+    const embedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}&dub=${targetVariant}`;
     let embedData = null;
 
     try {
@@ -249,7 +349,7 @@ class NetMirrorProvider extends BaseProvider {
     }
 
     if (!embedData || !embedData.ok) {
-      throw new Error(`Could not retrieve streaming embed data for ID ${id} with variant ${targetVariant}`);
+      throw new Error(`Could not retrieve streaming embed data for ID ${resolvedId} with variant ${targetVariant}`);
     }
 
     const variants = (variantsData.variants || []).map(v => ({
@@ -290,6 +390,41 @@ class NetMirrorProvider extends BaseProvider {
         message: `HTTP connection failed: ${err.message}`,
         responseTimeMs: duration
       };
+    }
+  }
+
+  /**
+   * Load dynamic variants mapping on startup
+   */
+  loadDynamicVariants() {
+    const filePath = path.resolve(config.netmirror.fallbackFile, '../dynamic-variants.json');
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const data = JSON.parse(raw);
+        Object.keys(data).forEach(vId => {
+          this.variantToTmdb.set(vId, data[vId]);
+        });
+        logger.info(`Loaded ${Object.keys(data).length} dynamic variant mapping(s) from ${filePath}`);
+      }
+    } catch (e) {
+      logger.warn(`Failed to load dynamic variants: ${e.message}`);
+    }
+  }
+
+  /**
+   * Save dynamic variants mapping
+   */
+  saveDynamicVariants() {
+    const filePath = path.resolve(config.netmirror.fallbackFile, '../dynamic-variants.json');
+    try {
+      const obj = {};
+      this.variantToTmdb.forEach((val, key) => {
+        obj[key] = val;
+      });
+      fs.writeFileSync(filePath, JSON.stringify(obj, null, 2), 'utf8');
+    } catch (e) {
+      logger.warn(`Failed to save dynamic variants: ${e.message}`);
     }
   }
 }

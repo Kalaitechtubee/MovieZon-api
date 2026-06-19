@@ -180,7 +180,7 @@ class ProviderManager {
       try {
         logger.info(`Fetching stream for TMDB ${id} (${type}) from primary provider: ${targetProvider.displayName}`);
         const data = await targetProvider.stream(id, type, season, episode, variantId, clientIp);
-        if (data && (data.streamUrl || data.qualities?.length > 0)) {
+        if (data && (data.streamUrl || data.qualities?.length > 0 || data.embedUrl)) {
           cache.set(cacheKey, data, 1800); // cache streams for 30 minutes
           return data;
         }
@@ -197,7 +197,7 @@ class ProviderManager {
       try {
         logger.info(`Failover: Trying provider ${provider.displayName} for stream of TMDB ${id}`);
         const data = await provider.stream(id, type, season, episode, variantId, clientIp);
-        if (data && (data.streamUrl || data.qualities?.length > 0)) {
+        if (data && (data.streamUrl || data.qualities?.length > 0 || data.embedUrl)) {
           logger.info(`Failover SUCCESSFUL: Retrieved stream from ${provider.displayName}`);
           cache.set(cacheKey, data, 1800);
           return data;
@@ -234,7 +234,7 @@ class ProviderManager {
           new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
         ]);
 
-        if (streamData && (streamData.streamUrl || streamData.qualities?.length > 0)) {
+        if (streamData && (streamData.streamUrl || streamData.qualities?.length > 0 || streamData.embedUrl)) {
           // Pre-cache the successful response in ProviderManager's cache format
           const cacheKey = `stream:${provider.name}:${type}:${id}:${season}:${episode}:default:${clientIp || 'default'}`;
           cache.set(cacheKey, streamData, 1800); // 30 minutes caching
@@ -243,7 +243,9 @@ class ProviderManager {
             name: provider.name,
             status: 'available',
             qualities: streamData.qualities?.map(q => q.quality) || [],
-            variants: streamData.variants || []
+            variants: streamData.variants || [],
+            streamType: streamData.streamType || null,
+            embedUrl: streamData.embedUrl || null
           };
         }
         
