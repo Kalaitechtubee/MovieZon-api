@@ -252,8 +252,17 @@ class NetMirrorProvider extends BaseProvider {
       throw new Error(`Could not retrieve streaming embed data for ID ${id} with variant ${targetVariant}`);
     }
 
+    const variants = (variantsData.variants || []).map(v => ({
+      id: String(v.dubSubjectId || v.id),
+      language: v.language || 'Default'
+    }));
+
     // 4. Normalize and return
-    return normalizeNetMirrorStream(embedData);
+    const normalized = normalizeNetMirrorStream(embedData);
+    if (normalized) {
+      normalized.variants = variants;
+    }
+    return normalized;
   }
 
   /**

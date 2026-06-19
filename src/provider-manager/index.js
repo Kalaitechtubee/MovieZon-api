@@ -242,7 +242,8 @@ class ProviderManager {
           return {
             name: provider.name,
             status: 'available',
-            qualities: streamData.qualities?.map(q => q.quality) || []
+            qualities: streamData.qualities?.map(q => q.quality) || [],
+            variants: streamData.variants || []
           };
         }
         
