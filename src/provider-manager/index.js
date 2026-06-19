@@ -172,7 +172,19 @@ class ProviderManager {
   async stream(providerName, id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
     const cacheKey = `stream:${providerName}:${type}:${id}:${season}:${episode}:${variantId || 'default'}:${clientIp || 'default'}`;
     const cached = cache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      if (cached.expires) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (cached.expires - nowSec < 60) {
+          logger.info(`Cached stream for provider ${providerName} ID ${id} is expired or close to expiry (expires at ${new Date(cached.expires * 1000).toISOString()}). Evicting from cache.`);
+          cache.del(cacheKey);
+        } else {
+          return cached;
+        }
+      } else {
+        return cached;
+      }
+    }
 
     // First attempt requested provider
     const targetProvider = registry.get(providerName);
@@ -181,7 +193,14 @@ class ProviderManager {
         logger.info(`Fetching stream for TMDB ${id} (${type}) from primary provider: ${targetProvider.displayName}`);
         const data = await targetProvider.stream(id, type, season, episode, variantId, clientIp);
         if (data && (data.streamUrl || data.qualities?.length > 0 || data.embedUrl)) {
-          cache.set(cacheKey, data, 1800); // cache streams for 30 minutes
+          let ttl = 1800; // default 30 mins
+          if (data.expires) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            ttl = Math.max(0, data.expires - nowSec - 60);
+          }
+          if (ttl > 0) {
+            cache.set(cacheKey, data, ttl);
+          }
           return data;
         }
       } catch (err) {
@@ -199,7 +218,14 @@ class ProviderManager {
         const data = await provider.stream(id, type, season, episode, variantId, clientIp);
         if (data && (data.streamUrl || data.qualities?.length > 0 || data.embedUrl)) {
           logger.info(`Failover SUCCESSFUL: Retrieved stream from ${provider.displayName}`);
-          cache.set(cacheKey, data, 1800);
+          let ttl = 1800;
+          if (data.expires) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            ttl = Math.max(0, data.expires - nowSec - 60);
+          }
+          if (ttl > 0) {
+            cache.set(cacheKey, data, ttl);
+          }
           return data;
         }
       } catch (err) {
@@ -237,7 +263,14 @@ class ProviderManager {
         if (streamData && (streamData.streamUrl || streamData.qualities?.length > 0 || streamData.embedUrl)) {
           // Pre-cache the successful response in ProviderManager's cache format
           const cacheKey = `stream:${provider.name}:${type}:${id}:${season}:${episode}:default:${clientIp || 'default'}`;
-          cache.set(cacheKey, streamData, 1800); // 30 minutes caching
+          let ttl = 1800;
+          if (streamData.expires) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            ttl = Math.max(0, streamData.expires - nowSec - 60);
+          }
+          if (ttl > 0) {
+            cache.set(cacheKey, streamData, ttl);
+          }
 
           return {
             name: provider.name,
