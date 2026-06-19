@@ -209,6 +209,69 @@ class ProviderManager {
 
     throw new Error(`Failed to retrieve streams for ${type} ID ${id} from all providers.`);
   }
+
+  /**
+   * Check availability of a media ID across all active providers in parallel.
+   * If a stream resolves successfully, it will be pre-cached, yielding instant playback later.
+   */
+  async checkAvailability(id, type, season = 1, episode = 1, clientIp = null) {
+    const providers = this.getSortedProviders();
+    if (providers.length === 0) {
+      return {
+        available: false,
+        providers: [],
+        bestProvider: null
+      };
+    }
+
+    // Call stream resolution in parallel with a timeout for each provider
+    const checkPromises = providers.map(async (provider) => {
+      try {
+        logger.debug(`[AvailabilityCheck] Checking provider ${provider.displayName} for TMDB ID: ${id}`);
+        // We use stream() directly, which triggers full stream resolution
+        const streamData = await Promise.race([
+          provider.stream(id, type, season, episode, null, clientIp),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
+        ]);
+
+        if (streamData && (streamData.streamUrl || streamData.qualities?.length > 0)) {
+          // Pre-cache the successful response in ProviderManager's cache format
+          const cacheKey = `stream:${provider.name}:${type}:${id}:${season}:${episode}:default:${clientIp || 'default'}`;
+          cache.set(cacheKey, streamData, 1800); // 30 minutes caching
+
+          return {
+            name: provider.name,
+            status: 'available',
+            qualities: streamData.qualities?.map(q => q.quality) || []
+          };
+        }
+        
+        return {
+          name: provider.name,
+          status: 'unavailable'
+        };
+      } catch (err) {
+        logger.debug(`[AvailabilityCheck] Provider ${provider.displayName} is unavailable/offline: ${err.message}`);
+        return {
+          name: provider.name,
+          status: 'offline'
+        };
+      }
+    });
+
+    const results = await Promise.all(checkPromises);
+    
+    // Select the best provider from available ones based on list ordering (since getSortedProviders is prioritized)
+    const availableProviders = results.filter(r => r.status === 'available');
+    const isAvailable = availableProviders.length > 0;
+    const bestProvider = isAvailable ? availableProviders[0].name : null;
+
+    return {
+      available: isAvailable,
+      providers: results,
+      bestProvider
+    };
+  }
 }
 
 // Export as a singleton

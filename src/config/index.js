@@ -23,6 +23,12 @@ const config = {
   http: {
     timeout: parseInt(process.env.HTTP_TIMEOUT, 10) || 10000,
     retries: parseInt(process.env.HTTP_RETRIES, 10) || 3
+  },
+  
+  // TMDB API Configuration
+  tmdb: {
+    baseUrl: process.env.TMDB_BASE_URL || 'https://api.tmdb.org/3',
+    apiKey: process.env.TMDB_API_KEY || '5bc6f3e00a5718a03b7bec56352790c6'
   }
 };
 

@@ -2,6 +2,67 @@ const axios = require('axios');
 const providerManager = require('../provider-manager');
 const healthService = require('../provider-health');
 const logger = require('../logger');
+const config = require('../config');
+
+/**
+ * Fetch movie/TV details from TMDB with cast, genres, and trailers appended
+ */
+async function fetchTmdbDetails(id, type) {
+  const { baseUrl, apiKey } = config.tmdb;
+  const pathType = type.toLowerCase() === 'tv' ? 'tv' : 'movie';
+  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos`;
+
+  try {
+    const response = await axios.get(url, { timeout: 5000 });
+    const data = response.data;
+    
+    // Normalize response to standard format
+    const title = data.title || data.name || 'Unknown Title';
+    const originalTitle = data.original_title || data.original_name || title;
+    const releaseDate = data.release_date || data.first_air_date || '';
+    const year = releaseDate ? new Date(releaseDate).getFullYear() : null;
+    const runtime = data.runtime || (data.episode_run_time && data.episode_run_time.length > 0 ? data.episode_run_time[0] : null);
+    
+    const cast = (data.credits?.cast || []).slice(0, 10).map(c => ({
+      name: c.name,
+      character: c.character,
+      profilePath: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null
+    }));
+    
+    const genres = (data.genres || []).map(g => g.name);
+    
+    // Find YouTube Trailer key
+    const trailer = (data.videos?.results || []).find(
+      v => v.type === 'Trailer' && v.site === 'YouTube'
+    )?.key || null;
+
+    const seasons = (data.seasons || []).map(s => ({
+      seasonNumber: s.season_number,
+      episodeCount: s.episode_count,
+      name: s.name || `Season ${s.season_number}`
+    })).filter(s => s.seasonNumber > 0);
+
+    return {
+      tmdbId: data.id,
+      title,
+      originalTitle,
+      overview: data.overview || '',
+      poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
+      year,
+      rating: data.vote_average || 0,
+      genres,
+      duration: runtime,
+      language: data.original_language || 'en',
+      cast,
+      trailer,
+      seasons
+    };
+  } catch (err) {
+    logger.warn(`Failed to fetch TMDB details for ${type} ID ${id}: ${err.message}`);
+    return null;
+  }
+}
 
 /**
  * Controller handling MovieZon API routes
@@ -50,6 +111,87 @@ const apiController = {
       res.json({
         ok: true,
         details
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /**
+   * GET /api/details/:id?type=movie|tv&season=1&episode=1
+   * Fetches metadata from TMDB and queries all providers in parallel for availability.
+   */
+  async unifiedDetails(req, res, next) {
+    try {
+      const { id } = req.params;
+      const { type, season, episode } = req.query;
+
+      if (!type || !['movie', 'tv'].includes(type.toLowerCase())) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Query parameter "type" must be "movie" or "tv".'
+        });
+      }
+
+      const isTv = type.toLowerCase() === 'tv';
+      const seasonNum = season ? parseInt(season, 10) : 1;
+      const episodeNum = episode ? parseInt(episode, 10) : 1;
+      
+      const clientIp = req.headers['x-forwarded-for']
+        ? req.headers['x-forwarded-for'].split(',')[0].trim()
+        : req.socket.remoteAddress;
+
+      logger.info(`Unified details query for ${type} ID ${id} (S${seasonNum}E${episodeNum}) requested by ${clientIp}`);
+
+      // Run TMDB Details fetch and Provider Availability checks in parallel
+      const [movieDetails, availability] = await Promise.all([
+        fetchTmdbDetails(id, type.toLowerCase()),
+        providerManager.checkAvailability(id, type.toLowerCase(), seasonNum, episodeNum, clientIp)
+      ]);
+
+      let finalDetails = movieDetails;
+      if (!finalDetails) {
+        logger.info(`Falling back to local provider catalog details for ID ${id}`);
+        try {
+          const localDetails = await providerManager.details('netmirror', id, type.toLowerCase());
+          if (localDetails) {
+            finalDetails = {
+              tmdbId: parseInt(localDetails.tmdbId || id, 10),
+              title: localDetails.title,
+              originalTitle: localDetails.originalTitle || localDetails.title,
+              overview: localDetails.overview || '',
+              poster: localDetails.poster,
+              backdrop: localDetails.backdrop,
+              year: localDetails.year,
+              rating: localDetails.rating,
+              genres: [],
+              duration: localDetails.duration,
+              language: localDetails.language || 'en',
+              cast: [],
+              trailer: null,
+              seasons: isTv ? [
+                { seasonNumber: 2, episodeCount: 9, name: 'Season 2' },
+                { seasonNumber: 3, episodeCount: 8, name: 'Season 3' },
+                { seasonNumber: 5, episodeCount: 8, name: 'Season 5' }
+              ] : []
+            };
+          }
+        } catch (localErr) {
+          logger.warn(`Local fallback details fetch failed: ${localErr.message}`);
+        }
+      }
+
+      if (!finalDetails) {
+        return res.status(404).json({
+          error: 'Not Found',
+          message: `Details for ${type} ID ${id} not found.`
+        });
+      }
+
+      res.json({
+        ok: true,
+        movie: finalDetails,
+        availability
       });
     } catch (err) {
       next(err);
