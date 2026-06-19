@@ -159,6 +159,26 @@ class NetMirrorProvider extends BaseProvider {
   }
 
   /**
+   * Helper to fetch NetMirror URLs, falling back to a Cloudflare Worker proxy if the direct request fails
+   */
+  async netmirrorGet(url, options = {}) {
+    try {
+      return await httpClient.get(url, options);
+    } catch (err) {
+      logger.warn(`[NetMirror] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+      const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}`;
+      try {
+        const res = await httpClient.get(proxyUrl, options);
+        logger.info(`[NetMirror Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
+        return res;
+      } catch (proxyErr) {
+        logger.error(`[NetMirror Proxy] Proxy request also failed: ${proxyErr.message}`);
+        throw err; // throw the original error
+      }
+    }
+  }
+
+  /**
    * search method
    */
   async search(query) {
@@ -189,7 +209,7 @@ class NetMirrorProvider extends BaseProvider {
 
     try {
       // 1. Try real HTTP request
-      const data = await httpClient.get(detailUrl);
+      const data = await this.netmirrorGet(detailUrl);
       if (data && data.ok) {
         data.tmdbId = data.tmdbId || id;
         return normalizeNetMirrorItem(data);
@@ -246,7 +266,7 @@ class NetMirrorProvider extends BaseProvider {
 
     // 1. Get variants
     try {
-      variantsData = await httpClient.get(variantsUrl, requestOptions);
+      variantsData = await this.netmirrorGet(variantsUrl, requestOptions);
 
       // Treat empty or missing variants array as a lookup failure → fall back to capture
       const liveVariants = variantsData && variantsData.variants;
@@ -267,7 +287,7 @@ class NetMirrorProvider extends BaseProvider {
       let directEmbedData = null;
 
       try {
-        directEmbedData = await httpClient.get(directEmbedUrl, requestOptions);
+        directEmbedData = await this.netmirrorGet(directEmbedUrl, requestOptions);
         if (!directEmbedData || !directEmbedData.ok) {
           throw new Error('Direct embed returned non-ok');
         }
@@ -342,7 +362,7 @@ class NetMirrorProvider extends BaseProvider {
     let embedData = null;
 
     try {
-      embedData = await httpClient.get(embedUrl, requestOptions);
+      embedData = await this.netmirrorGet(embedUrl, requestOptions);
     } catch (err) {
       logger.warn(`[NetMirror] Live request failed for embed. Falling back to capture. Error: ${err.message}`);
       embedData = this.getCapturedResponse(embedUrl);
