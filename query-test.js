@@ -1,21 +1,25 @@
-const NetMirrorProvider = require('./src/providers/netmirror');
-const logger = require('./src/logger');
+const axios = require('axios');
 
-async function testProvider() {
-  const provider = new NetMirrorProvider();
-  
-  // Make sure we enable debug logging
-  logger.level = 'debug';
-
+async function check() {
+  const url = 'https://net27.cc/api/catalog/search-hybrid?q=Amaran';
   try {
-    console.log("Calling provider.stream()...");
-    const result = await provider.stream('76479', 'tv', 1, 1, null, '127.0.0.1');
-    console.log("Result:", JSON.stringify(result, null, 2));
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://net27.cc/'
+      },
+      validateStatus: false
+    });
+    console.log("Status Code:", res.status);
+    if (res.data && res.data.items) {
+      const match = res.data.items.find(item => String(item.tmdbId) === '927342');
+      console.log("Matched Item in Search:", JSON.stringify(match, null, 2));
+    } else {
+      console.log("No items found.");
+    }
   } catch (err) {
-    console.error("Provider stream error caught:", err.message);
+    console.error("Error:", err.message);
   }
 }
-
-testProvider();
 
 check();
