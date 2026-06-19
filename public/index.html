@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MovieZon - Unified Movie Streaming</title>
+  
+  <!-- Modern Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    :root {
+      --bg-color: #0b0b0f;
+      --panel-bg: rgba(22, 22, 33, 0.7);
+      --glass-border: rgba(255, 255, 255, 0.08);
+      --primary-gradient: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
+      --accent-glow: rgba(124, 58, 237, 0.3);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent-color: #a78bfa;
+      --font-outfit: 'Outfit', sans-serif;
+      --font-space: 'Space Grotesk', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      font-family: var(--font-outfit);
+      overflow-x: hidden;
+      min-height: 100vh;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(124, 58, 237, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(79, 70, 229, 0.08) 0%, transparent 40%);
+    }
+
+    header {
+      background: rgba(11, 11, 15, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--glass-border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      padding: 1rem 4%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo {
+      font-family: var(--font-space);
+      font-size: 1.8rem;
+      font-weight: 700;
+      background: linear-gradient(to right, #a78bfa, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .search-container {
+      display: flex;
+      align-items: center;
+      background: var(--panel-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 9999px;
+      padding: 0.25rem 0.25rem 0.25rem 1.25rem;
+      width: 400px;
+      max-width: 100%;
+      transition: all 0.3s ease;
+    }
+
+    .search-container:focus-within {
+      border-color: var(--accent-color);
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+
+    .search-container input {
+      background: transparent;
+      border: none;
+      color: white;
+      outline: none;
+      width: 100%;
+      font-size: 0.95rem;
+    }
+
+    .search-container input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .search-container button {
+      background: var(--primary-gradient);
+      color: white;
+      border: none;
+      border-radius: 9999px;
+      padding: 0.6rem 1.4rem;
+      font-family: var(--font-space);
+      font-weight: 500;
+      cursor: pointer;
+      transition: transform 0.2s ease;
+    }
+
+    .search-container button:hover {
+      transform: scale(1.05);
+    }
+
+    main {
+      padding: 2rem 4%;
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2.5rem;
+    }
+
+    /* Video Player / Theater Area */
+    .player-section {
+      display: none;
+      flex-direction: column;
+      gap: 1.5rem;
+      background: var(--panel-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    .player-wrapper {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16/9;
+      background: black;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: inset 0 0 40px rgba(0,0,0,0.8);
+    }
+
+    .player-wrapper video {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .player-controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      padding-top: 0.5rem;
+    }
+
+    .playing-title {
+      font-size: 1.4rem;
+      font-weight: 700;
+      font-family: var(--font-space);
+    }
+
+    .player-options {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .select-dropdown {
+      background: #1e1b29;
+      color: white;
+      border: 1px solid var(--glass-border);
+      border-radius: 8px;
+      padding: 0.5rem 1rem;
+      font-family: var(--font-outfit);
+      outline: none;
+      cursor: pointer;
+    }
+
+    .select-dropdown:focus {
+      border-color: var(--accent-color);
+    }
+
+    .close-player-btn {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+
+    .close-player-btn:hover {
+      background: rgba(239, 68, 68, 0.3);
+    }
+
+    /* Grid Layout */
+    .section-title {
+      font-family: var(--font-space);
+      font-size: 1.6rem;
+      font-weight: 700;
+      border-left: 4px solid var(--accent-color);
+      padding-left: 0.8rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .results-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1.8rem;
+    }
+
+    /* Card Styling */
+    .movie-card {
+      background: var(--panel-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: 12px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .movie-card:hover {
+      transform: translateY(-8px);
+      border-color: var(--accent-color);
+      box-shadow: 0 10px 25px rgba(124, 58, 237, 0.15);
+    }
+
+    .card-poster {
+      position: relative;
+      aspect-ratio: 2/3;
+      background: #141419;
+      overflow: hidden;
+    }
+
+    .card-poster img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: transform 0.5s ease;
+    }
+
+    .movie-card:hover .card-poster img {
+      transform: scale(1.05);
+    }
+
+    .card-badge {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(11, 11, 15, 0.85);
+      backdrop-filter: blur(4px);
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #fbbf24;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      border: 1px solid rgba(251, 191, 36, 0.2);
+    }
+
+    .card-type-badge {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: var(--primary-gradient);
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .card-content {
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      flex-grow: 1;
+    }
+
+    .card-title {
+      font-weight: 600;
+      font-size: 1rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .card-metadata {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Modal / Details Panel Drawer */
+    .details-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(8px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    .modal-content {
+      background: #0f0f15;
+      border: 1px solid var(--glass-border);
+      border-radius: 20px;
+      width: 100%;
+      max-width: 900px;
+      max-height: 90vh;
+      overflow-y: auto;
+      position: relative;
+      box-shadow: 0 25px 50px rgba(0,0,0,0.6);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .modal-hero {
+      position: relative;
+      height: 300px;
+      background-size: cover;
+      background-position: center;
+    }
+
+    .modal-hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to bottom, transparent 30%, #0f0f15 100%);
+    }
+
+    .modal-close-btn {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      background: rgba(11, 11, 15, 0.8);
+      border: 1px solid var(--glass-border);
+      color: white;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      z-index: 10;
+    }
+
+    .modal-close-btn:hover {
+      transform: scale(1.1);
+      background: rgba(255,255,255,0.1);
+    }
+
+    .modal-body {
+      padding: 2rem;
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      gap: 2rem;
+    }
+
+    @media (max-width: 768px) {
+      .modal-body {
+        grid-template-columns: 1fr;
+      }
+      .modal-poster-col {
+        display: none;
+      }
+      .search-container {
+        width: 100%;
+      }
+      header {
+        flex-direction: column;
+        gap: 1rem;
+      }
+    }
+
+    .modal-poster {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--glass-border);
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+
+    .modal-info-col {
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+
+    .modal-title {
+      font-size: 2.2rem;
+      font-weight: 800;
+      font-family: var(--font-space);
+      line-height: 1.1;
+    }
+
+    .modal-meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .meta-badge {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--glass-border);
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      color: white;
+      font-weight: 500;
+    }
+
+    .modal-overview {
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: #d1d5db;
+    }
+
+    .tv-controls {
+      display: none;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 1.2rem;
+      border-radius: 12px;
+      border: 1px solid var(--glass-border);
+      margin-top: 1rem;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .stream-trigger-section {
+      margin-top: 1.5rem;
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .play-now-btn {
+      background: var(--primary-gradient);
+      color: white;
+      border: none;
+      padding: 0.8rem 1.8rem;
+      border-radius: 8px;
+      font-family: var(--font-space);
+      font-size: 1.05rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      box-shadow: 0 4px 15px rgba(124, 58, 237, 0.4);
+      transition: all 0.2s ease;
+    }
+
+    .play-now-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(124, 58, 237, 0.6);
+    }
+
+    /* Loading skeleton */
+    .loader {
+      display: none;
+      justify-content: center;
+      align-items: center;
+      padding: 3rem;
+    }
+
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 5px solid rgba(124, 58, 237, 0.2);
+      border-bottom-color: var(--accent-color);
+      border-radius: 50%;
+      display: inline-block;
+      box-sizing: border-box;
+      animation: rotation 1s linear infinite;
+    }
+
+    @keyframes rotation {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    /* Subtitle Track Styling */
+    video::cue {
+      background: rgba(0, 0, 0, 0.8);
+      color: #f3f4f6;
+      font-family: var(--font-outfit);
+      font-size: 1.1rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">
+      <i class="fa-solid fa-play-css" style="color: #a78bfa;"></i>
+      MovieZon
+    </div>
+    
+    <div class="search-container">
+      <input type="text" id="search-input" placeholder="Search movies or shows (e.g. Dhurandhar)..." onkeydown="if(event.key==='Enter') performSearch()">
+      <button onclick="performSearch()"><i class="fa-solid fa-magnifying-glass"></i> Search</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Theater / Player Area -->
+    <section class="player-section" id="player-section">
+      <h2 class="playing-title" id="player-title">Now Playing</h2>
+      
+      <div class="player-wrapper">
+        <video id="video-player" controls autoplay crossorgin="anonymous">
+          Your browser does not support HTML5 video.
+        </video>
+      </div>
+
+      <div class="player-controls">
+        <div class="player-options">
+          <label for="quality-select" style="font-size: 0.9rem; color: var(--text-muted);">Quality:</label>
+          <select id="quality-select" class="select-dropdown" onchange="changeVideoQuality()">
+            <!-- Populated dynamically -->
+          </select>
+
+          <label for="subtitle-select" style="font-size: 0.9rem; color: var(--text-muted); margin-left: 1rem;">Subtitles:</label>
+          <select id="subtitle-select" class="select-dropdown" onchange="changeSubtitles()">
+            <option value="none">Off</option>
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+
+        <button class="close-player-btn" onclick="closePlayer()"><i class="fa-solid fa-circle-xmark"></i> Close Player</button>
+      </div>
+    </section>
+
+    <!-- Content Catalog Grid -->
+    <section>
+      <h2 class="section-title" id="grid-title">Popular Items</h2>
+      
+      <div class="loader" id="grid-loader">
+        <span class="spinner"></span>
+      </div>
+
+      <div class="results-grid" id="results-grid">
+        <!-- Movies injected here -->
+      </div>
+    </section>
+  </main>
+
+  <!-- Details Dialog Drawer Modal -->
+  <div class="details-modal" id="details-modal" onclick="if(event.target===this) closeModal()">
+    <div class="modal-content">
+      <div class="modal-hero" id="modal-hero">
+        <button class="modal-close-btn" onclick="closeModal()"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-poster-col">
+          <img src="" id="modal-poster" class="modal-poster" alt="Poster">
+        </div>
+        <div class="modal-info-col">
+          <h2 class="modal-title" id="modal-title">Title</h2>
+          
+          <div class="modal-meta-row">
+            <span class="meta-badge" id="modal-type">Movie</span>
+            <span id="modal-year">2024</span>
+            <span><i class="fa-solid fa-star" style="color: #fbbf24;"></i> <span id="modal-rating">8.5</span></span>
+            <span id="modal-duration">120 mins</span>
+            <span id="modal-lang" class="meta-badge">EN</span>
+          </div>
+
+          <p class="modal-overview" id="modal-overview">Overview loading...</p>
+
+          <!-- TV season / episode selection -->
+          <div class="tv-controls" id="tv-controls">
+            <h3 style="font-family: var(--font-space); font-size: 1.1rem; margin-bottom: 0.5rem;">Select Episode</h3>
+            <div style="display: flex; gap: 1rem;">
+              <div>
+                <label style="font-size: 0.85rem; color: var(--text-muted); display: block; margin-bottom: 0.2rem;">Season</label>
+                <select id="season-select" class="select-dropdown" onchange="onSeasonChange()"></select>
+              </div>
+              <div style="flex-grow: 1;">
+                <label style="font-size: 0.85rem; color: var(--text-muted); display: block; margin-bottom: 0.2rem;">Episode</label>
+                <select id="episode-select" class="select-dropdown" style="width: 100%;"></select>
+              </div>
+            </div>
+          </div>
+
+          <div class="stream-trigger-section">
+            <button class="play-now-btn" onclick="startStreaming()"><i class="fa-solid fa-play"></i> Watch Now</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Active states
+    let selectedItem = null;
+    let availableStreams = null;
+    let tvSeasons = {}; // cached tv seasons details to construct selectors
+
+    // Determine API Base URL dynamically.
+    // If the HTML page is run via VS Code Live Server (port 5500), route requests to the backend (port 3000).
+    // Otherwise, route queries relatively.
+    const API_BASE = window.location.port === '5500' ? 'http://localhost:3000' : '';
+
+    // On page load, pull initial items
+    window.addEventListener('DOMContentLoaded', () => {
+      // Default search for Dhurandhar to present files captured in json
+      performSearch('Dhurandhar');
+    });
+
+    // Search query trigger
+    function performSearch(forcedQuery = null) {
+      const q = forcedQuery || document.getElementById('search-input').value;
+      if (!q || !q.trim()) return;
+
+      const grid = document.getElementById('results-grid');
+      const loader = document.getElementById('grid-loader');
+      const title = document.getElementById('grid-title');
+
+      grid.innerHTML = '';
+      loader.style.display = 'flex';
+      title.innerText = `Search results for "${q}"`;
+      
+      fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`)
+        .then(res => res.json())
+        .then(data => {
+          loader.style.display = 'none';
+          if (data.ok && data.items.length > 0) {
+            data.items.forEach(item => {
+              grid.appendChild(createMovieCard(item));
+            });
+          } else {
+            grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: var(--text-muted);">No movies or shows found in capture database for "${q}". Try searching "Dhurandhar" or "Stranger".</div>`;
+          }
+        })
+        .catch(err => {
+          loader.style.display = 'none';
+          grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: #f87171;">Failed to fetch search results: ${err.message}</div>`;
+        });
+    }
+
+    // Helper to render grid card
+    function createMovieCard(item) {
+      const card = document.createElement('div');
+      card.className = 'movie-card';
+      card.onclick = () => showDetails(item);
+
+      const posterUrl = item.poster || 'https://via.placeholder.com/200x300?text=No+Poster';
+      const typeLabel = item.type === 'tv' ? 'TV Show' : 'Movie';
+      const yearLabel = item.year || 'N/A';
+      const ratingLabel = item.rating ? item.rating.toFixed(1) : 'N/A';
+
+      card.innerHTML = `
+        <div class="card-poster">
+          <img src="${posterUrl}" alt="${item.title}" loading="lazy">
+          <div class="card-type-badge">${typeLabel}</div>
+          <div class="card-badge"><i class="fa-solid fa-star"></i> ${ratingLabel}</div>
+        </div>
+        <div class="card-content">
+          <div class="card-title" title="${item.title}">${item.title}</div>
+          <div class="card-metadata">
+            <span>${yearLabel}</span>
+            <span style="text-transform: capitalize;">${item.provider}</span>
+          </div>
+        </div>
+      `;
+      return card;
+    }
+
+    // Show details drawer
+    function showDetails(item) {
+      selectedItem = item;
+      
+      const modal = document.getElementById('details-modal');
+      const title = document.getElementById('modal-title');
+      const type = document.getElementById('modal-type');
+      const year = document.getElementById('modal-year');
+      const rating = document.getElementById('modal-rating');
+      const duration = document.getElementById('modal-duration');
+      const lang = document.getElementById('modal-lang');
+      const overview = document.getElementById('modal-overview');
+      const poster = document.getElementById('modal-poster');
+      const hero = document.getElementById('modal-hero');
+      const tvSection = document.getElementById('tv-controls');
+
+      // Clear defaults
+      title.innerText = item.title;
+      type.innerText = item.type === 'tv' ? 'TV Show' : 'Movie';
+      year.innerText = item.year || 'N/A';
+      rating.innerText = item.rating ? item.rating.toFixed(1) : 'N/A';
+      duration.innerText = item.duration ? `${item.duration} mins` : 'N/A';
+      lang.innerText = (item.language || 'en').toUpperCase();
+      overview.innerText = item.overview || 'No overview available.';
+      poster.src = item.poster || '';
+      hero.style.backgroundImage = item.backdrop ? `url(${item.backdrop})` : 'none';
+
+      tvSection.style.display = 'none';
+
+      // Load deep metadata details
+      fetch(`${API_BASE}/api/details/${item.provider}/${item.id}?type=${item.type}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.ok && data.details) {
+            const details = data.details;
+            overview.innerText = details.overview || item.overview;
+            duration.innerText = details.duration ? `${details.duration} mins` : (details.runtime ? `${details.runtime} mins` : 'N/A');
+          }
+        })
+        .catch(err => console.warn('Failed to load rich details:', err));
+
+      // Handle TV episode structure
+      if (item.type === 'tv') {
+        tvSection.style.display = 'flex';
+        populateTvSeasons(item);
+      }
+
+      modal.style.display = 'flex';
+    }
+
+    // Load TV episodes selections
+    function populateTvSeasons(item) {
+      const seasonSel = document.getElementById('season-select');
+      const episodeSel = document.getElementById('episode-select');
+      
+      seasonSel.innerHTML = '';
+      episodeSel.innerHTML = '';
+
+      // For NetMirror capture, we have mock seasons for Stranger Things (ID 66732)
+      // Seasons captured are Season 2, Season 3, and Season 5.
+      if (item.id === '66732') {
+        const seasons = [2, 3, 5];
+        seasons.forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s;
+          opt.innerText = `Season ${s}`;
+          seasonSel.appendChild(opt);
+        });
+        
+        onSeasonChange();
+      } else {
+        // Default single placeholder season/episode for other tv shows
+        const optS = document.createElement('option');
+        optS.value = 1;
+        optS.innerText = 'Season 1';
+        seasonSel.appendChild(optS);
+
+        const optE = document.createElement('option');
+        optE.value = 1;
+        optE.innerText = 'Episode 1';
+        episodeSel.appendChild(optE);
+      }
+    }
+
+    // Handles season dropdown change
+    function onSeasonChange() {
+      const seasonSel = document.getElementById('season-select');
+      const episodeSel = document.getElementById('episode-select');
+      const season = seasonSel.value;
+
+      episodeSel.innerHTML = '<option>Loading episodes...</option>';
+
+      // Call our backend/capture to list episodes for season
+      // For NetMirror fallback, the details are parsed directly
+      // Let's call details endpoint or default list
+      // For Stranger Things season 5: we have Chapter One, Two, Three, etc.
+      // We can mock lists, or load episodes based on TMDB ID
+      // To keep it simple and robust, let's inject based on known capture sizes:
+      // Season 2: 9 episodes, Season 3: 8 episodes, Season 5: 8 episodes.
+      episodeSel.innerHTML = '';
+      let epCount = 8;
+      if (season == '2') epCount = 9;
+      if (season == '3') epCount = 8;
+      if (season == '5') epCount = 8;
+
+      for (let i = 1; i <= epCount; i++) {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.innerText = `Episode ${i}`;
+        episodeSel.appendChild(opt);
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('details-modal').style.display = 'none';
+    }
+
+    // Begin Video Playback
+    function startStreaming() {
+      if (!selectedItem) return;
+
+      closeModal();
+      
+      const playerSection = document.getElementById('player-section');
+      const playerTitle = document.getElementById('player-title');
+      const video = document.getElementById('video-player');
+      const qualitySelect = document.getElementById('quality-select');
+      const subtitleSelect = document.getElementById('subtitle-select');
+
+      playerSection.style.display = 'flex';
+      playerTitle.innerText = `Loading stream: ${selectedItem.title}...`;
+      
+      // Scroll to player
+      playerSection.scrollIntoView({ behavior: 'smooth' });
+
+      // Build parameters
+      let streamUrl = `${API_BASE}/api/stream/${selectedItem.provider}/${selectedItem.id}?type=${selectedItem.type}`;
+      if (selectedItem.type === 'tv') {
+        const s = document.getElementById('season-select').value;
+        const e = document.getElementById('episode-select').value;
+        streamUrl += `&season=${s}&episode=${e}`;
+      }
+
+      qualitySelect.innerHTML = '<option>Loading...</option>';
+      subtitleSelect.innerHTML = '<option value="none">Off</option>';
+
+      // Fetch stream credentials
+      fetch(streamUrl)
+        .then(res => res.json())
+        .then(data => {
+          if (data.ok && data.stream) {
+            availableStreams = data.stream;
+            
+            playerTitle.innerText = `Now Playing: ${selectedItem.title} ${selectedItem.type === 'tv' ? `(S${document.getElementById('season-select').value}E${document.getElementById('episode-select').value})` : ''}`;
+
+            // Populate quality dropdown
+            qualitySelect.innerHTML = '';
+            if (availableStreams.qualities && availableStreams.qualities.length > 0) {
+              availableStreams.qualities.forEach((q, idx) => {
+                const opt = document.createElement('option');
+                opt.value = q.url;
+                opt.innerText = q.quality || `Quality ${idx+1}`;
+                // Select 1080p by default if available, or first
+                if (q.quality === '1080p') {
+                  opt.selected = true;
+                }
+                qualitySelect.appendChild(opt);
+              });
+            } else if (availableStreams.streamUrl) {
+              const opt = document.createElement('option');
+              opt.value = availableStreams.streamUrl;
+              opt.innerText = 'Default Quality';
+              qualitySelect.appendChild(opt);
+            }
+
+            // Populate subtitle tracks
+            subtitleSelect.innerHTML = '<option value="none">Off</option>';
+            if (availableStreams.subtitles && availableStreams.subtitles.length > 0) {
+              availableStreams.subtitles.forEach((s, idx) => {
+                const opt = document.createElement('option');
+                opt.value = s.url;
+                opt.innerText = s.name || s.lang || `Track ${idx+1}`;
+                subtitleSelect.appendChild(opt);
+              });
+            }
+
+            // Load and play video source
+            changeVideoQuality();
+          } else {
+            playerTitle.innerText = `Failed to load stream.`;
+            alert('Streaming sources are not available for this item in capture database.');
+          }
+        })
+        .catch(err => {
+          playerTitle.innerText = `Error loading stream.`;
+          alert(`Failed to load video stream: ${err.message}`);
+        });
+    }
+
+    // Handles stream source switching
+    function changeVideoQuality() {
+      const video = document.getElementById('video-player');
+      const qualitySelect = document.getElementById('quality-select');
+      const rawUrl = qualitySelect.value;
+      
+      if (!rawUrl) return;
+
+      // Wrap the raw CDN URL in our backend proxy to satisfy Referer checks and CORS requirements
+      const proxyUrl = `${API_BASE}/api/proxy-stream?url=${encodeURIComponent(rawUrl)}`;
+      
+      const currentTime = video.currentTime;
+      const isPaused = video.paused;
+
+      video.src = proxyUrl;
+      video.load();
+      
+      video.onloadedmetadata = () => {
+        video.currentTime = currentTime;
+        if (!isPaused) {
+          video.play().catch(e => console.log("Auto-play blocked:", e));
+        }
+      };
+    }
+
+    // Parse and load SRT subtitle files in HTML5 player by converting to WebVTT on the fly
+    function changeSubtitles() {
+      const video = document.getElementById('video-player');
+      const subSelect = document.getElementById('subtitle-select');
+      const subUrl = subSelect.value;
+
+      // Remove existing text tracks
+      const tracks = video.querySelectorAll('track');
+      tracks.forEach(track => track.remove());
+
+      if (subUrl === 'none') return;
+
+      // Fetch SRT and convert to VTT in the browser
+      // We route SRT fetching through our proxy stream to bypass CORS
+      const proxySubUrl = `${API_BASE}/api/proxy-stream?url=${encodeURIComponent(subUrl)}`;
+
+      fetch(proxySubUrl)
+        .then(res => res.text())
+        .then(srtText => {
+          // Convert SRT to WebVTT format
+          let vttText = 'WEBVTT\n\n';
+          vttText += srtText
+            .replace(/\r/g, '')
+            .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2'); // swap SRT comma with WebVTT period for timestamp
+
+          const blob = new Blob([vttText], { type: 'text/vtt' });
+          const objectUrl = URL.createObjectURL(blob);
+
+          const track = document.createElement('track');
+          track.kind = 'subtitles';
+          track.label = subSelect.options[subSelect.selectedIndex].text;
+          track.srclang = 'en';
+          track.src = objectUrl;
+          track.default = true;
+
+          video.appendChild(track);
+          console.log('WebVTT Subtitles track loaded successfully');
+        })
+        .catch(err => console.error('Failed to load subtitles track:', err));
+    }
+
+    function closePlayer() {
+      const playerSection = document.getElementById('player-section');
+      const video = document.getElementById('video-player');
+      
+      video.pause();
+      video.src = '';
+      playerSection.style.display = 'none';
+    }
+  </script>
+</body>
+</html>
