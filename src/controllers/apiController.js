@@ -225,9 +225,11 @@ const apiController = {
       }
 
       // Extract client IP (handling reverse proxies)
-      const clientIp = req.headers['x-forwarded-for']
+      // For download requests, do not forward client IP to generate signatures locked to the server IP instead
+      const isDownload = req.query.download === 'true';
+      const clientIp = isDownload ? null : (req.headers['x-forwarded-for']
         ? req.headers['x-forwarded-for'].split(',')[0].trim()
-        : req.socket.remoteAddress;
+        : req.socket.remoteAddress);
 
       const streamInfo = await providerManager.stream(
         provider,
@@ -321,10 +323,18 @@ apiController.proxyStream = async function(req, res, next) {
     }
 
     // Determine target URL. If it's a CDN link from hakunaymatata.com, wrap it in NetMirror's custom Cloudflare Worker proxy
+    // (Only if it's not a direct backend download request, since the backend handles CORS natively)
     let targetUrl = decodedUrl;
-    if (decodedUrl.includes('hakunaymatata.com') && !decodedUrl.includes('streamhub-proxy')) {
+    const isDownload = req.query.download === 'true';
+    if (!isDownload && decodedUrl.includes('hakunaymatata.com') && !decodedUrl.includes('streamhub-proxy')) {
       targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(decodedUrl)}`;
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
+    }
+
+    // Set attachment header for direct download trigger without navigation
+    if (isDownload) {
+      const filename = req.query.filename || 'video.mp4';
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     }
 
     const headers = {
