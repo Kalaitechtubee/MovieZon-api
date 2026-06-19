@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 const BaseProvider = require('../BaseProvider');
 const httpClient = require('../../utils/httpClient');
 const config = require('../../config');
@@ -389,6 +390,38 @@ class NetMirrorProvider extends BaseProvider {
     const normalized = normalizeNetMirrorStream(embedData);
     if (normalized) {
       normalized.variants = variants;
+
+      // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link
+      const testUrl = normalized.streamUrl || (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
+      if (testUrl) {
+        logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
+        
+        let targetUrl = testUrl;
+        if (testUrl.includes('hakunaymatata.com') && !testUrl.includes('streamhub-proxy')) {
+          targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(testUrl)}`;
+        }
+
+        try {
+          const res = await axios.get(targetUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Referer': `${config.netmirror.baseUrl}/`,
+              'Range': 'bytes=0-10'
+            },
+            timeout: 3000,
+            validateStatus: false
+          });
+
+          if (res.status === 403 || res.status === 404) {
+            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found). Discarding NetMirror stream.`);
+            throw new Error(`Stream CDN returned status ${res.status}`);
+          }
+          logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
+        } catch (err) {
+          logger.warn(`[NetMirror] Stream check failed: ${err.message}. Triggering provider fallback.`);
+          throw err;
+        }
+      }
     }
     return normalized;
   }
