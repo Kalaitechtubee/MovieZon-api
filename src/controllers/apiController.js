@@ -65,6 +65,50 @@ async function fetchTmdbDetails(id, type) {
 }
 
 /**
+ * Search movies and TV shows on TMDB
+ */
+async function searchTmdb(query) {
+  const { baseUrl, apiKey } = config.tmdb;
+  const url = `${baseUrl}/search/multi?api_key=${apiKey}&query=${encodeURIComponent(query)}&language=en-US`;
+
+  try {
+    const response = await axios.get(url, { timeout: 5000 });
+    const results = response.data.results || [];
+    
+    return results
+      .filter(item => ['movie', 'tv'].includes(item.media_type))
+      .map(item => {
+        const title = item.title || item.name || 'Unknown Title';
+        const originalTitle = item.original_title || item.original_name || title;
+        const releaseDate = item.release_date || item.first_air_date || '';
+        const year = releaseDate ? new Date(releaseDate).getFullYear() : null;
+        
+        return {
+          id: String(item.id),
+          provider: 'tmdb',
+          tmdbId: item.id,
+          imdbId: null,
+          title,
+          originalTitle,
+          year,
+          type: item.media_type,
+          language: item.original_language || 'en',
+          quality: '1080p',
+          poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
+          backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}` : null,
+          overview: item.overview || '',
+          duration: null,
+          rating: item.vote_average || 0,
+          providers: []
+        };
+      });
+  } catch (err) {
+    logger.warn(`Failed to search TMDB for "${query}": ${err.message}`);
+    return [];
+  }
+}
+
+/**
  * Controller handling MovieZon API routes
  */
 const apiController = {
@@ -81,11 +125,21 @@ const apiController = {
         });
       }
 
-      const results = await providerManager.search(q);
+      logger.info(`Search request received for query: "${q}"`);
+
+      // 1. Try TMDB search first
+      let items = await searchTmdb(q.trim());
+      
+      // 2. If TMDB search failed or returned 0 results, fall back to local provider catalog database
+      if (items.length === 0) {
+        logger.info(`TMDB search returned 0 items. Querying local providers index...`);
+        items = await providerManager.search(q);
+      }
+
       res.json({
         ok: true,
-        count: results.length,
-        items: results
+        count: items.length,
+        items
       });
     } catch (err) {
       next(err);
