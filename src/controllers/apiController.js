@@ -82,13 +82,19 @@ const apiController = {
         });
       }
 
+      // Extract client IP (handling reverse proxies)
+      const clientIp = req.headers['x-forwarded-for']
+        ? req.headers['x-forwarded-for'].split(',')[0].trim()
+        : req.socket.remoteAddress;
+
       const streamInfo = await providerManager.stream(
         provider,
         id,
         type.toLowerCase(),
         seasonNum,
         episodeNum,
-        variant || null
+        variant || null,
+        clientIp
       );
 
       res.json({

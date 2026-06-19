@@ -169,8 +169,8 @@ class ProviderManager {
   /**
    * Fetch stream url for a tmdbId, with failover support
    */
-  async stream(providerName, id, type, season = 1, episode = 1, variantId = null) {
-    const cacheKey = `stream:${providerName}:${type}:${id}:${season}:${episode}:${variantId || 'default'}`;
+  async stream(providerName, id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
+    const cacheKey = `stream:${providerName}:${type}:${id}:${season}:${episode}:${variantId || 'default'}:${clientIp || 'default'}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
@@ -179,7 +179,7 @@ class ProviderManager {
     if (targetProvider) {
       try {
         logger.info(`Fetching stream for TMDB ${id} (${type}) from primary provider: ${targetProvider.displayName}`);
-        const data = await targetProvider.stream(id, type, season, episode, variantId);
+        const data = await targetProvider.stream(id, type, season, episode, variantId, clientIp);
         if (data && (data.streamUrl || data.qualities?.length > 0)) {
           cache.set(cacheKey, data, 1800); // cache streams for 30 minutes
           return data;
@@ -196,7 +196,7 @@ class ProviderManager {
       
       try {
         logger.info(`Failover: Trying provider ${provider.displayName} for stream of TMDB ${id}`);
-        const data = await provider.stream(id, type, season, episode, variantId);
+        const data = await provider.stream(id, type, season, episode, variantId, clientIp);
         if (data && (data.streamUrl || data.qualities?.length > 0)) {
           logger.info(`Failover SUCCESSFUL: Retrieved stream from ${provider.displayName}`);
           cache.set(cacheKey, data, 1800);

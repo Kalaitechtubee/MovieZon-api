@@ -188,15 +188,24 @@ class NetMirrorProvider extends BaseProvider {
   /**
    * stream method
    */
-  async stream(id, type, season = 1, episode = 1, variantId = null) {
-    logger.debug(`[NetMirror] stream() called for ID: ${id}, Type: ${type}, Season: ${season}, Episode: ${episode}, Variant: ${variantId}`);
+  async stream(id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
+    logger.debug(`[NetMirror] stream() called for ID: ${id}, Type: ${type}, Season: ${season}, Episode: ${episode}, Variant: ${variantId}, Client IP: ${clientIp}`);
     
     const variantsUrl = `${config.netmirror.baseUrl}/api/variants-tmdb/${type}/${id}?se=${season}&ep=${episode}`;
     let variantsData = null;
 
+    // Construct headers for forwarding client IP to avoid IP-mismatched signatures
+    const requestOptions = {};
+    if (clientIp) {
+      requestOptions.headers = {
+        'X-Forwarded-For': clientIp,
+        'X-Real-IP': clientIp
+      };
+    }
+
     // 1. Get variants
     try {
-      variantsData = await httpClient.get(variantsUrl);
+      variantsData = await httpClient.get(variantsUrl, requestOptions);
     } catch (err) {
       logger.warn(`[NetMirror] Live request failed for variants. Falling back to capture. Error: ${err.message}`);
       variantsData = this.getCapturedResponse(variantsUrl);
@@ -233,7 +242,7 @@ class NetMirrorProvider extends BaseProvider {
     let embedData = null;
 
     try {
-      embedData = await httpClient.get(embedUrl);
+      embedData = await httpClient.get(embedUrl, requestOptions);
     } catch (err) {
       logger.warn(`[NetMirror] Live request failed for embed. Falling back to capture. Error: ${err.message}`);
       embedData = this.getCapturedResponse(embedUrl);

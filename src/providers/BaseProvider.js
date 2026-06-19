@@ -38,7 +38,7 @@ class BaseProvider {
    * @param {string} [variantId] - Specific language/dub variant ID (optional)
    * @returns {Promise<Object>} Normalized MovieZon stream details object
    */
-  async stream(id, type, season = 1, episode = 1, variantId = null) {
+  async stream(id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
     throw new Error(`Method 'stream()' must be implemented by provider ${this.displayName}`);
   }
 
