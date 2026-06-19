@@ -17,6 +17,14 @@ class NetMirrorProvider extends BaseProvider {
   }
 
   /**
+   * Resolve a variant ID back to the TMDB ID
+   */
+  resolveTmdbId(id) {
+    const mapping = this.variantToTmdb.get(String(id));
+    return mapping ? mapping.tmdbId : id;
+  }
+
+  /**
    * Helper to normalize URLs for map lookup (ignoring protocol/domain, sorting query parameters)
    */
   getUrlKey(urlStr) {
