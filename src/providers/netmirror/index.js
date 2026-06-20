@@ -409,16 +409,13 @@ class NetMirrorProvider extends BaseProvider {
         }
       }
 
-      // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link
-      // Run this HTTP check. In production, logs warnings but never discards/fails the stream on check failure.
+      // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link.
+      // IMPORTANT: hakunaymatata.com CDN tokens are IP-signed for THIS server's IP (clientIp=null).
+      // We must fetch directly (NOT via a Cloudflare Worker proxy) so the requesting IP matches
+      // the signed token IP. Using a CF Worker introduces a different IP → 403.
       const testUrl = normalized.streamUrl || (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
       if (testUrl) {
         logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
-        
-        let targetUrl = testUrl;
-        if (testUrl.includes('hakunaymatata.com') && !testUrl.includes('streamhub-proxy') && !testUrl.includes('workers.dev')) {
-          targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(testUrl)}`;
-        }
 
         try {
           const axiosOptions = {
@@ -427,25 +424,23 @@ class NetMirrorProvider extends BaseProvider {
               'Referer': `${config.netmirror.baseUrl}/`,
               'Range': 'bytes=0-10'
             },
-            timeout: 3000,
+            timeout: 5000,
             validateStatus: false
           };
 
-          const res = await axios.get(targetUrl, axiosOptions);
+          // Fetch directly — no CF Worker wrapper. The CDN token is signed for this server's IP.
+          const res = await axios.get(testUrl, axiosOptions);
 
           if (res.status === 403 || res.status === 404) {
-            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/expired). Discarding stream.`);
-            // Always throw so the cross-provider fallback in apiController activates,
-            // both in development and production.
-            throw new Error(`Stream CDN returned ${res.status} - URL may be expired or IP-restricted`);
+            logger.warn(`[NetMirror] Stream URL check returned ${res.status} (token expired or IP mismatch). Discarding stream.`);
+            // Throw unconditionally so cross-provider fallback activates in both dev and prod.
+            throw new Error(`Stream CDN returned ${res.status} - token expired or IP mismatch`);
           } else {
-            logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
+            logger.info(`[NetMirror] Stream URL verified OK (Status: ${res.status}).`);
           }
         } catch (err) {
-          logger.warn(`[NetMirror] Stream check failed: ${err.message}.`);
-          if (config.isDev) {
-            throw err;
-          }
+          logger.warn(`[NetMirror] Stream connectivity check failed: ${err.message}. Discarding stream.`);
+          throw err; // Always throw — let apiController try Peachify fallback
         }
       }
     }
