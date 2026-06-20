@@ -23,25 +23,7 @@ class NetMirrorProvider extends BaseProvider {
    */
   initializeProxy() {
     this.proxyConfig = null;
-    if (config.proxyUrl) {
-      try {
-        const parsed = new URL(config.proxyUrl);
-        this.proxyConfig = {
-          protocol: parsed.protocol.replace(':', ''),
-          host: parsed.hostname,
-          port: parseInt(parsed.port, 10) || (parsed.protocol === 'https:' ? 443 : 80)
-        };
-        if (parsed.username || parsed.password) {
-          this.proxyConfig.auth = {
-            username: decodeURIComponent(parsed.username),
-            password: decodeURIComponent(parsed.password)
-          };
-        }
-        logger.info(`[NetMirror] Configured outgoing Axios proxy for connectivity checks: ${this.proxyConfig.host}:${this.proxyConfig.port}`);
-      } catch (e) {
-        logger.warn(`[NetMirror] Failed to parse PROXY_URL: ${e.message}`);
-      }
-    }
+    // Outgoing proxy is disabled globally to prevent connection blocks and routing issues.
   }
 
   /**
@@ -428,7 +410,7 @@ class NetMirrorProvider extends BaseProvider {
       }
 
       // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link
-      // Run this HTTP check in both development and production, using the proxy if configured
+      // Run this HTTP check. In production, logs warnings but never discards/fails the stream on check failure.
       const testUrl = normalized.streamUrl || (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
       if (testUrl) {
         logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
@@ -449,20 +431,21 @@ class NetMirrorProvider extends BaseProvider {
             validateStatus: false
           };
 
-          if (this.proxyConfig) {
-            axiosOptions.proxy = this.proxyConfig;
-          }
-
           const res = await axios.get(targetUrl, axiosOptions);
 
           if (res.status === 403 || res.status === 404) {
-            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found). Discarding NetMirror stream.`);
-            throw new Error(`Stream CDN returned status ${res.status}`);
+            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found).`);
+            if (config.isDev) {
+              throw new Error(`Stream CDN returned status ${res.status}`);
+            }
+          } else {
+            logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
           }
-          logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
         } catch (err) {
-          logger.warn(`[NetMirror] Stream check failed: ${err.message}. Triggering provider fallback.`);
-          throw err;
+          logger.warn(`[NetMirror] Stream check failed: ${err.message}.`);
+          if (config.isDev) {
+            throw err;
+          }
         }
       }
     }

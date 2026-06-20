@@ -450,7 +450,13 @@ const apiController = {
       const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
       const proxyUrl = (originalUrl, streamHeaders) => {
         if (!originalUrl) return '';
-        if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) {
+        // If the URL is already proxied or points to a Cloudflare Worker proxy directly (e.g. workers.dev),
+        // we bypass the backend stream proxy so the client plays the stream directly.
+        if (
+          originalUrl.includes('/stream/proxy') ||
+          originalUrl.includes('/proxy-stream') ||
+          originalUrl.includes('workers.dev')
+        ) {
           return originalUrl;
         }
         let pUrl = `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
@@ -468,6 +474,20 @@ const apiController = {
           ...q,
           url: proxyUrl(q.url, q.headers || streamInfo.headers)
         }));
+      }
+      if (streamInfo.subtitles && Array.isArray(streamInfo.subtitles)) {
+        streamInfo.subtitles = streamInfo.subtitles.map(sub => {
+          if (!sub.url) return sub;
+          let subHeaders = { ...streamInfo.headers };
+          if (sub.url.includes('eat-peach.sbs') || sub.url.includes('peachify')) {
+            subHeaders['Referer'] = 'https://peachify.top/';
+            subHeaders['Origin'] = 'https://peachify.top';
+          }
+          return {
+            ...sub,
+            url: proxyUrl(sub.url, subHeaders)
+          };
+        });
       }
 
       // For embed-type streams (e.g. Peachify), return the embed URL directly

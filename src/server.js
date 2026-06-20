@@ -1,8 +1,14 @@
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 const http = require('http');
 const app = require('./app');
 const config = require('./config');
 const logger = require('./logger');
 const healthService = require('./provider-health');
+
 
 // Create HTTP Server
 const server = http.createServer(app);

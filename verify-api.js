@@ -1,6 +1,12 @@
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 const axios = require('axios');
 const { spawn } = require('child_process');
 const path = require('path');
+
 
 // Test Config
 const port = process.env.PORT || 3000;

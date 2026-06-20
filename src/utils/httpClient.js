@@ -3,25 +3,8 @@ const config = require('../config');
 const logger = require('../logger');
 
 let proxyConfig = null;
-if (config.proxyUrl) {
-  try {
-    const parsed = new URL(config.proxyUrl);
-    proxyConfig = {
-      protocol: parsed.protocol.replace(':', ''),
-      host: parsed.hostname,
-      port: parseInt(parsed.port, 10) || (parsed.protocol === 'https:' ? 443 : 80)
-    };
-    if (parsed.username || parsed.password) {
-      proxyConfig.auth = {
-        username: decodeURIComponent(parsed.username),
-        password: decodeURIComponent(parsed.password)
-      };
-    }
-    logger.info(`[HttpClient] Configured outgoing Axios proxy: ${proxyConfig.host}:${proxyConfig.port}`);
-  } catch (e) {
-    logger.warn(`[HttpClient] Failed to parse PROXY_URL: ${e.message}`);
-  }
-}
+// Outgoing proxy is disabled globally to prevent connection blocks and routing issues.
+
 
 const clientOptions = {
   timeout: config.http.timeout,
