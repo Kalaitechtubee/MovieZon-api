@@ -450,15 +450,15 @@ const apiController = {
       const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
       const proxyUrl = (originalUrl, streamHeaders) => {
         if (!originalUrl) return '';
-        // If the URL is already proxied or points to a Cloudflare Worker proxy directly (e.g. workers.dev),
-        // we bypass the backend stream proxy so the client plays the stream directly.
+        // Skip re-proxying URLs that are already going through our own backend proxy endpoint
         if (
           originalUrl.includes('/stream/proxy') ||
-          originalUrl.includes('/proxy-stream') ||
-          originalUrl.includes('workers.dev')
+          originalUrl.includes('/proxy-stream')
         ) {
           return originalUrl;
         }
+        // All other URLs (including workers.dev Cloudflare Worker proxy URLs) are routed
+        // through the backend proxy so the server can attach proper headers and stream to the client.
         let pUrl = `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
         if (streamHeaders && Object.keys(streamHeaders).length > 0) {
           pUrl += `&headers=${encodeURIComponent(JSON.stringify(streamHeaders))}`;
@@ -478,10 +478,15 @@ const apiController = {
       if (streamInfo.subtitles && Array.isArray(streamInfo.subtitles)) {
         streamInfo.subtitles = streamInfo.subtitles.map(sub => {
           if (!sub.url) return sub;
-          let subHeaders = { ...streamInfo.headers };
+          let subHeaders = {};
+          if (streamInfo.headers) {
+            Object.keys(streamInfo.headers).forEach(k => {
+              subHeaders[k.toLowerCase()] = streamInfo.headers[k];
+            });
+          }
           if (sub.url.includes('eat-peach.sbs') || sub.url.includes('peachify')) {
-            subHeaders['Referer'] = 'https://peachify.top/';
-            subHeaders['Origin'] = 'https://peachify.top';
+            subHeaders['referer'] = 'https://peachify.top/';
+            subHeaders['origin'] = 'https://peachify.top';
           }
           return {
             ...sub,
@@ -747,8 +752,8 @@ apiController.proxyStream = async function(req, res, next) {
     }
 
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Referer': 'https://net27.cc/'
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'referer': 'https://net27.cc/'
     };
 
     if (queryHeaders) {
@@ -757,27 +762,28 @@ apiController.proxyStream = async function(req, res, next) {
         const parsed = JSON.parse(decodeURIComponent(rawHeaders));
         Object.keys(parsed).forEach(k => {
           const lowerKey = k.toLowerCase();
-          if (lowerKey === 'user-agent') {
-            delete headers['User-Agent'];
-            headers['user-agent'] = parsed[k];
-          } else if (lowerKey === 'referer') {
-            delete headers['Referer'];
-            headers['referer'] = parsed[k];
-          } else {
-            headers[k] = parsed[k];
-          }
+          // Delete any existing key that matches case-insensitively to prevent duplicates
+          Object.keys(headers).forEach(hk => {
+            if (hk.toLowerCase() === lowerKey) {
+              delete headers[hk];
+            }
+          });
+          headers[lowerKey] = parsed[k];
         });
       } catch (e) {
         logger.warn(`Failed to parse custom query headers: ${e.message}`);
       }
     }
 
-    // Omit Referer and Origin headers for Cloudflare Worker proxies to bypass security blocks (403 Forbidden)
+    // For Cloudflare Worker proxies (workers.dev), strip Referer/Origin from our own request
+    // since the worker itself forwards the correct headers from the query string to the CDN.
     if (targetUrl.includes('workers.dev')) {
       delete headers['Referer'];
       delete headers['referer'];
       delete headers['Origin'];
       delete headers['origin'];
+      delete headers['User-Agent'];
+      delete headers['user-agent'];
     }
 
     if (req.headers.range) {
@@ -835,7 +841,8 @@ apiController.proxyStream = async function(req, res, next) {
       }
     }
 
-    logger.debug(`Proxying stream to: ${targetUrl} (Range: ${req.headers.range || 'All'})`);
+    logger.debug(`[ProxyStream] Proxying stream to targetUrl: "${targetUrl}"`);
+    logger.debug(`[ProxyStream] Request headers: ${JSON.stringify(headers)}`);
 
     const response = await axios({
       method: 'get',
