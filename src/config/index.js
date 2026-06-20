@@ -4,7 +4,7 @@ const path = require('path');
 const config = {
   port: parseInt(process.env.PORT, 10) || 3000,
   env: process.env.NODE_ENV || 'development',
-  isDev: (process.env.NODE_ENV || 'development') === 'development',
+  isDev: (process.env.NODE_ENV || 'development') === 'development' && !process.env.RENDER,
   cacheTtl: parseInt(process.env.CACHE_TTL, 10) || 3600,
   
   // Providers config
