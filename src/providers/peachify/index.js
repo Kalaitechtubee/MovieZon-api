@@ -267,8 +267,8 @@ class PeachifyProvider extends BaseProvider {
     }
 
     // Fallback if scraping/decryption failed
-    // Use reliable public embed sources instead of peachify.top which opens that site's full player UI
-    const fallbackEmbeds = [];
+    // Prioritize Peachify's own embed player, using public ones as alternative fallbacks
+    const fallbackEmbeds = [embedUrl];
     if (mediaType === 'tv') {
       fallbackEmbeds.push(
         `https://vidsrc.to/embed/tv/${resolvedId}/${season}/${episode}`,
@@ -284,7 +284,7 @@ class PeachifyProvider extends BaseProvider {
     }
 
     const primaryFallbackEmbed = fallbackEmbeds[0];
-    logger.warn(`[Peachify] No direct stream resolved. Returning reliable embed fallback: ${primaryFallbackEmbed}`);
+    logger.warn(`[Peachify] No direct stream resolved. Returning Peachify embed fallback: ${primaryFallbackEmbed}`);
 
     return {
       provider: 'peachify',
