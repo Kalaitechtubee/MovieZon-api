@@ -8,8 +8,10 @@ const config = {
   cacheTtl: parseInt(process.env.CACHE_TTL, 10) || 3600,
   proxyUrl: process.env.PROXY_URL || null,
   
-  // Providers config
-  providerPriority: (process.env.PROVIDER_PRIORITY || 'netmirror')
+  // Providers config — order defines the deterministic resolution pipeline.
+  // Provider 1 (index 0) is always tried first. Fallback proceeds in order.
+  // To add a new provider: create its folder, then append its name here.
+  providerPriority: (process.env.PROVIDER_PRIORITY || 'netmirror,peachify')
     .split(',')
     .map(p => p.trim().toLowerCase())
     .filter(Boolean),

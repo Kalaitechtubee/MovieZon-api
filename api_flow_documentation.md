@@ -36,8 +36,8 @@ graph TD
 3. **Provider Manager** (`src/provider-manager/`): Orchestrates queries across providers, handles merge/de-duplication, implements timeouts, and drives automatic failover routing.
 4. **BaseProvider Contract** (`src/providers/BaseProvider.js`): Abstract class defining the required interface for `search`, `details`, `stream`, and `health`.
 5. **Concrete Providers**:
-   * **NetMirror** (`src/providers/netmirror/`): Translates requests into `net27.cc` API calls, falling back to a pre-indexed local capture file. CDN URLs are IP-signed for the **backend server's IP** so the backend proxy can serve them correctly.
-   * **Peachify** (`src/providers/peachify/`): Fetches & AES-GCM-decrypts encrypted payloads from `eat-peach.sbs`. Falls back to a Cloudflare Worker proxy (with forwarded headers) when the server IP is blocked. If all scraping fails, returns an iframe embed fallback.
+   * **NetMirror** (`src/providers/netmirror/`): Translates requests into `net27.cc` API calls, falling back to a pre-indexed local catalog file. CDN URLs are IP-signed for the **backend server's IP** so the backend proxy can serve them correctly.
+   * **Peachify** (`src/providers/peachify/`): Fetches & AES-GCM-decrypts encrypted payloads from `eat-peach.sbs`. Supports optional outbound residential proxy routing via the `PROXY_URL` environment variable. If the direct/proxied scraper request fails, it retries via a Cloudflare Worker proxy (`streamhub-proxy`) with forwarded headers. If all scraping fails, returns an iframe embed fallback.
 
 ---
 
@@ -129,7 +129,9 @@ sequenceDiagram
 
 ### 3. Peachify Scraper & Stream Flow
 
-Peachify resolves direct streams by fetching and AES-GCM-decrypting encrypted payloads from 5 `eat-peach.sbs` scraper APIs. On Render, datacenter IPs are blocked by `eat-peach.sbs`; the provider retries via a Cloudflare Worker proxy that forwards the required `Referer`/`Origin` headers in its query string.
+Peachify resolves direct streams by fetching and AES-GCM-decrypting encrypted payloads from 5 `eat-peach.sbs` scraper APIs. To bypass datacenter IP blocks (e.g., on Render), Peachify supports routing scraper requests through an optional residential proxy configured via the `PROXY_URL` environment variable.
+
+If the direct scraper request (using the residential proxy, if configured) fails, the provider retries via a Cloudflare Worker proxy (`streamhub-proxy`) that forwards the required `Referer`/`Origin` headers encoded in its query string. If both the direct/proxied and Cloudflare Worker requests fail, Peachify falls back to constructing direct iframe embed URLs.
 
 ```mermaid
 sequenceDiagram
@@ -437,13 +439,16 @@ Proxies raw video binary streams to bypass CORS, Referer, and IP-restriction che
 | Rule | Condition | Action |
 |------|-----------|--------|
 | **Skip re-proxy** | URL already contains `/stream/proxy` or `/proxy-stream` | Return URL as-is (no double-wrapping) |
+| **Extract nested URL** | URL is wrapped in an `eat-peach.sbs` or `peachify` proxy wrapper (contains `?url=...`) | Extract and proxy the nested target URL directly to bypass blocked scraper hostnames |
+| **CF Worker redirection** | `hakunaymatata.com` URL (and NOT a download or subtitle request) | Wrap/redirect the request to `streamhub-proxy.1545zoya.workers.dev` to save backend server bandwidth |
+| **Direct CDN fetch** | `hakunaymatata.com` URL for downloads or subtitles | Fetch directly from the Render server (no Cloudflare Worker wrapping) to ensure correct IP-signed token matching and direct file downloads |
 | **Strip worker headers** | URL contains `workers.dev` | Remove `Referer`, `Origin`, `User-Agent` — the CF Worker manages its own headers to the CDN |
 | **HLS rewriting** | URL ends in `.m3u8` or contains `m3u8`/`hls-proxy` | Fetch playlist, rewrite all segment URLs to route through this proxy |
 | **Range passthrough** | Client sends `Range: bytes=x-y` | Forward Range header; return `206 Partial Content` for seeking support |
-| **Direct CDN fetch** | `hakunaymatata.com` URLs | Fetch **directly** (not via CF Worker) — token is signed for Render's server IP |
 
-> [!WARNING]
-> Do **not** wrap `hakunaymatata.com` CDN URLs in a Cloudflare Worker proxy. The CDN token is IP-signed for the **Render server's IP**. Routing via a CF Worker introduces a different IP → `403 Forbidden`. Fetch directly from the Render server to match the signed IP.
+> [!NOTE]
+> During video playback, `hakunaymatata.com` CDN URLs are wrapped in `streamhub-proxy.1545zoya.workers.dev` to save backend server bandwidth.
+> Subtitles and direct downloads (`download=true`) bypass this Cloudflare Worker proxy wrapping and fetch directly from the backend server to ensure compatibility and correct asset delivery.
 
 ---
 
@@ -520,19 +525,16 @@ Lists active providers, their health status, response times, and priority order.
 ## 🔑 Key Design Decisions & Known Behaviours
 
 ### IP Signing & Backend Proxy
-All CDN tokens from `hakunaymatata.com` are signed for the **backend server's IP** (`clientIp = null`). Every stream URL returned to the client is wrapped in `/api/v2/stream/proxy`, which fetches the CDN from the same server IP. This design means:
-- ✅ Backend proxy always gets `200/206` from the CDN
-- ✅ No `403` due to client/server IP mismatch
-- ✅ Works identically from local dev and Render production
+All CDN tokens from `hakunaymatata.com` are signed for the **backend server's IP** (`clientIp = null`). Stream URLs returned to the client are wrapped in `/api/v2/stream/proxy`, which routes playback streams to the Cloudflare Worker proxy (`streamhub-proxy`) to save bandwidth, while routing downloads and subtitles directly via the Render backend server to maintain IP-signed token compatibility.
 
 ### CDN Connectivity Check
-The connectivity check in `NetMirror.stream()` fetches the CDN URL **directly** (no Cloudflare Worker wrapper). The signed token's IP is Render's server IP. The check runs from Render's server. Same IP = `200 OK`. Using a CF Worker intermediary would introduce a different IP and produce `403`, falsely discarding a valid stream.
+The connectivity check in `NetMirror.stream()` fetches the CDN URL **directly** (no Cloudflare Worker wrapper). The signed token's IP is Render's server IP. The check runs from Render's server. Same IP = `200 OK`. Using a CF Worker intermediary would introduce a different IP and produce `403`, falsely discarding a valid stream. The checker always throws on failure to ensure cross-provider fallbacks are executed reliably.
 
 ### Cross-Provider Fallback
 When NetMirror's CDN check fails (token expired or 403), an error is thrown. The `apiController.stream()` handler catches it, detects no valid stream, and **automatically retries with Peachify**. This happens transparently — the client receives either NetMirror or Peachify streams without knowing a failover occurred.
 
 ### Peachify on Render (Degraded health, functional streams)
-Render's datacenter IP is blocked by `eat-peach.sbs`. Peachify retries via `streamhub-proxy` Cloudflare Worker, encoding the required `Referer`, `Origin`, and `User-Agent` headers as a JSON-encoded query parameter (`headers=`). If this also fails (403 from CF Worker), Peachify falls back to embed sources (`vidsrc.to`, `autoembed.cc`, `embed.su`).
+Render's datacenter IP is blocked by `eat-peach.sbs`. Peachify can bypass this by routing scraper requests through a residential proxy configured via the `PROXY_URL` environment variable. If the proxy is not configured or fails, Peachify retries via the `streamhub-proxy` Cloudflare Worker, encoding the required `Referer`, `Origin`, and `User-Agent` headers as a JSON-encoded query parameter (`headers=`). If this also fails (403 from CF Worker), Peachify falls back to embed sources (`vidsrc.to`, `autoembed.cc`, `embed.su`).
 
 ### Token Expiry Window
 CDN tokens use a `t` Unix timestamp parameter (generation time). Tokens are treated as valid for `3600 − 300 = 3300 seconds` (55 minutes). This 5-minute early-rejection buffer ensures the client never receives a URL that expires mid-playback.

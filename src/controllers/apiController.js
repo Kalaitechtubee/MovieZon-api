@@ -222,13 +222,21 @@ const apiController = {
   },
 
   /**
-   * GET /api/details/:id?type=movie|tv&season=1&episode=1
-   * Fetches metadata from TMDB and queries all providers in parallel for availability.
+   * GET /api/v2/details/tmdb/:id?type=movie|tv
+   *
+   * Unified details endpoint. ALL provider logic is delegated to
+   * providerManager.resolveDetails() — the controller is a thin formatter.
+   *
+   * resolveDetails() runs the same sequential pipeline as resolveStream():
+   *   Phase 1 (Metadata) : NetMirror → Peachify → ... (stop at first success)
+   *   Phase 2 (Streams)  : Check ALL providers in parallel for sources list
+   *   Sources             : ALL providers in priority order, with available flag
+   *   defaultProvider     : First provider with a working stream (= same as resolveStream)
    */
   async unifiedDetails(req, res, next) {
     try {
       const { id } = req.params;
-      const { type, season, episode } = req.query;
+      const { type } = req.query;
 
       if (!type || !['movie', 'tv'].includes(type.toLowerCase())) {
         return res.status(400).json({
@@ -237,65 +245,42 @@ const apiController = {
         });
       }
 
-      const isTv = type.toLowerCase() === 'tv';
-      const seasonNum = season ? parseInt(season, 10) : 1;
-      const episodeNum = episode ? parseInt(episode, 10) : 1;
-      
-      const clientIp = req.headers['x-forwarded-for']
-        ? req.headers['x-forwarded-for'].split(',')[0].trim()
-        : req.socket.remoteAddress;
+      const parsedType = type.toLowerCase();
+      logger.info(`[UnifiedDetails] TMDB ${id} (${parsedType}) — delegating to resolveDetails() pipeline`);
 
-      logger.info(`Unified details query for ${type} ID ${id} (S${seasonNum}E${episodeNum}) requested by ${clientIp}`);
-
-      // Run TMDB Details fetch and Provider Availability checks in parallel
-      const [movieDetails, availability] = await Promise.all([
-        fetchTmdbDetails(id, type.toLowerCase()),
-        providerManager.checkAvailability(id, type.toLowerCase(), seasonNum, episodeNum, clientIp)
-      ]);
-
-      let finalDetails = movieDetails;
-      if (!finalDetails) {
-        logger.info(`Falling back to local provider catalog details for ID ${id}`);
-        try {
-          const localDetails = await providerManager.details('netmirror', id, type.toLowerCase());
-          if (localDetails) {
-            finalDetails = {
-              tmdbId: parseInt(localDetails.tmdbId || id, 10),
-              title: localDetails.title,
-              originalTitle: localDetails.originalTitle || localDetails.title,
-              overview: localDetails.overview || '',
-              poster: localDetails.poster,
-              backdrop: localDetails.backdrop,
-              year: localDetails.year,
-              rating: localDetails.rating,
-              genres: [],
-              duration: localDetails.duration,
-              language: localDetails.language || 'en',
-              cast: [],
-              trailer: null,
-              seasons: isTv ? [
-                { seasonNumber: 2, season_number: 2, episodeCount: 9, episode_count: 9, name: 'Season 2' },
-                { seasonNumber: 3, season_number: 3, episodeCount: 8, episode_count: 8, name: 'Season 3' },
-                { seasonNumber: 5, season_number: 5, episodeCount: 8, episode_count: 8, name: 'Season 5' }
-              ] : []
-            };
-          }
-        } catch (localErr) {
-          logger.warn(`Local fallback details fetch failed: ${localErr.message}`);
+      // ─── Single unified pipeline ────────────────────────────────────────────
+      // resolveDetails() handles:
+      //   - Sequential metadata resolution (NetMirror → Peachify)
+      //   - Stream availability for ALL providers (sources list)
+      //   - defaultProvider selection (identical logic to resolveStream)
+      // This CANNOT return Peachify as defaultProvider while NetMirror is healthy.
+      let finalDetails;
+      try {
+        finalDetails = await providerManager.resolveDetails(id, parsedType);
+      } catch (resolveErr) {
+        // Fallback: try TMDB metadata directly (no stream data)
+        logger.warn(`[UnifiedDetails] resolveDetails() failed: ${resolveErr.message}. Attempting TMDB metadata fallback...`);
+        const tmdbData = await fetchTmdbDetails(id, parsedType);
+        if (!tmdbData) {
+          return res.status(404).json({
+            error: 'Not Found',
+            message: `Details for ${parsedType} ID ${id} not found.`
+          });
         }
+        finalDetails = { ...tmdbData, sources: [], defaultProvider: null };
       }
 
       if (!finalDetails) {
         return res.status(404).json({
           error: 'Not Found',
-          message: `Details for ${type} ID ${id} not found.`
+          message: `Details for ${parsedType} ID ${id} not found.`
         });
       }
 
-      // Format properties for client compliance
+      // ─── Format for client compliance ──────────────────────────────────────
       finalDetails.id = finalDetails.id || String(finalDetails.tmdbId || id);
       finalDetails.provider = finalDetails.provider || 'tmdb';
-      finalDetails.mediaType = finalDetails.mediaType || type.toLowerCase();
+      finalDetails.mediaType = finalDetails.mediaType || parsedType;
       finalDetails.description = finalDetails.description || finalDetails.overview || '';
       finalDetails.overview = finalDetails.overview || finalDetails.description || '';
       finalDetails.genre = finalDetails.genre || (Array.isArray(finalDetails.genres) ? finalDetails.genres.join(', ') : '');
@@ -305,71 +290,21 @@ const apiController = {
         finalDetails.rating = `TMDB ${finalDetails.rating.toFixed(1)}`;
       }
 
-      // Map provider availability check results to V2 sources array
-      const sources = [];
-      if (availability && Array.isArray(availability.providers)) {
-        availability.providers.forEach(p => {
-          if (p.status === 'available') {
-            if (p.streamType === 'embed' && p.embedUrl) {
-              // Peachify / iframe embed providers (Server 2)
-              sources.push({
-                provider: p.name,
-                id: String(id),
-                languages: ['Original Audio'],
-                label: 'Server 2 (Peachify)',
-                streamType: 'embed'
-              });
-            } else if (p.variants && p.variants.length > 0) {
-              p.variants.forEach(v => {
-                sources.push({
-                  provider: p.name,
-                  id: v.id, // dubSubjectId
-                  languages: [v.language]
-                });
-              });
-            } else {
-              sources.push({
-                provider: p.name,
-                id: String(id),
-                languages: ['Original Audio']
-              });
-            }
-          }
-        });
-      }
-
-      finalDetails.sources = sources;
-
-      // --- SERVER 2 (PEACHIFY) SAFETY NET ---
-      // Ensure Peachify (Server 2) is always added as a source if it is not already present,
-      // so the client can always switch to Server 2 as a fallback.
-      const hasPeachifySource = sources.some(s => s.provider === 'peachify');
-      if (!hasPeachifySource) {
-        logger.info(`[UnifiedDetails] Adding Peachify (Server 2) as fallback source for ID ${id}.`);
-        sources.push({
-          provider: 'peachify',
-          id: String(id),
-          languages: ['Original Audio'],
-          label: 'Server 2 (Peachify)',
-          streamType: 'embed'
-        });
-        finalDetails.sources = sources;
-      }
-
-
+      // sources and defaultProvider are already set by resolveDetails()
+      // No controller-level provider logic here.
 
       res.json({
         ok: true,
         success: true,
         movie: finalDetails,
         details: finalDetails,
-        availability,
         results: finalDetails
       });
     } catch (err) {
       next(err);
     }
   },
+
 
   /**
    * GET /api/stream/:provider/:id?type=movie|tv&season=1&episode=1&variant=variantId
@@ -418,6 +353,9 @@ const apiController = {
       const isDownload = req.query.download === 'true';
       const clientIp = null;
 
+      // NOTE: This endpoint handles EXPLICIT provider requests (e.g. user manually switching
+      // to Server 2). Provider selection and fallback is entirely inside ProviderManager.
+      // Do NOT add any provider-specific fallback logic here.
       let streamInfo = null;
       try {
         streamInfo = await providerManager.stream(
@@ -430,38 +368,7 @@ const apiController = {
           clientIp
         );
       } catch (err) {
-        logger.warn(`Could not retrieve stream for provider ${provider} ID ${parsedId}: ${err.message}`);
-      }
-
-      // --- CROSS-PROVIDER FALLBACK ---
-      // If the primary provider (NetMirror) failed or returned expired/empty streams,
-      // automatically fall back to Peachify before returning 404.
-      const isNetmirror = provider.toLowerCase() === 'netmirror';
-      const hasValidStreams = streamInfo && (
-        (streamInfo.qualities && streamInfo.qualities.length > 0) ||
-        (streamInfo.streamUrl && streamInfo.streamUrl.length > 0) ||
-        (streamInfo.streamType === 'embed' && streamInfo.embedUrl)
-      );
-
-      if (!hasValidStreams && isNetmirror) {
-        logger.info(`[Stream] NetMirror returned no valid stream for ID ${parsedId}. Attempting Peachify fallback...`);
-        try {
-          const peachifyInfo = await providerManager.stream(
-            'peachify',
-            parsedId,
-            parsedType.toLowerCase(),
-            seasonNum,
-            episodeNum,
-            null,
-            null
-          );
-          if (peachifyInfo) {
-            streamInfo = peachifyInfo;
-            logger.info(`[Stream] Peachify fallback succeeded for ID ${parsedId} (streamType: ${peachifyInfo.streamType || 'native'})`);
-          }
-        } catch (peachErr) {
-          logger.warn(`[Stream] Peachify fallback also failed for ID ${parsedId}: ${peachErr.message}`);
-        }
+        logger.warn(`[Stream:explicit] Could not retrieve stream for provider ${provider} ID ${parsedId}: ${err.message}`);
       }
 
       if (!streamInfo) {
@@ -741,6 +648,131 @@ const apiController = {
     }
   }
 };
+
+/**
+ * GET /api/v2/stream/tmdb/:tmdbId?type=movie|tv&season=1&episode=1
+ *
+ * Backend-controlled sequential provider pipeline.
+ * The backend decides which provider to use — the frontend never chooses.
+ * Provider order: always follows config.providerPriority (NetMirror first, Peachify second, etc.)
+ */
+apiController.resolveStream = async function(req, res, next) {
+  try {
+    const { tmdbId } = req.params;
+    const { type, season, episode, variant } = req.query;
+
+    const parsedType = (type || 'movie').toLowerCase();
+    if (!['movie', 'tv'].includes(parsedType)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Query parameter "type" must be "movie" or "tv".'
+      });
+    }
+
+    const seasonNum = season ? parseInt(season, 10) : 1;
+    const episodeNum = episode ? parseInt(episode, 10) : 1;
+
+    if (parsedType === 'tv' && (isNaN(seasonNum) || isNaN(episodeNum))) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'For type "tv", "season" and "episode" must be valid numbers.'
+      });
+    }
+
+    logger.info(`[ResolveStream] Backend pipeline request for TMDB ${tmdbId} (${parsedType} S${seasonNum}E${episodeNum})`);
+
+    // clientIp = null so CDN tokens are signed for THIS server's IP (backend proxies all streams)
+    const streamResult = await providerManager.resolveStream(
+      tmdbId,
+      parsedType,
+      seasonNum,
+      episodeNum,
+      null
+    );
+
+    // If pipeline found nothing
+    if (!streamResult.available) {
+      logger.warn(`[ResolveStream] No provider available for TMDB ${tmdbId}`);
+      return res.status(404).json({
+        ok: false,
+        success: false,
+        available: false,
+        reason: streamResult.reason || 'No provider available',
+        streams: [],
+        subtitles: []
+      });
+    }
+
+    // Build proxy URL helper (same as explicit stream endpoint)
+    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const host = req.get('host');
+    const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+    const proxyUrl = (originalUrl, streamHeaders) => {
+      if (!originalUrl) return '';
+      if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) return originalUrl;
+      let pUrl = `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
+      if (streamHeaders && Object.keys(streamHeaders).length > 0) {
+        pUrl += `&headers=${encodeURIComponent(JSON.stringify(streamHeaders))}`;
+      }
+      return pUrl;
+    };
+
+    // Proxy stream URLs
+    if (streamResult.streamUrl) {
+      streamResult.streamUrl = proxyUrl(streamResult.streamUrl, streamResult.headers);
+    }
+    if (streamResult.qualities && Array.isArray(streamResult.qualities)) {
+      streamResult.qualities = streamResult.qualities.map(q => ({
+        ...q,
+        url: proxyUrl(q.url, q.headers || streamResult.headers)
+      }));
+    }
+    if (streamResult.subtitles && Array.isArray(streamResult.subtitles)) {
+      streamResult.subtitles = streamResult.subtitles.map(sub => {
+        if (!sub.url) return sub;
+        let subHeaders = { ...(streamResult.headers || {}) };
+        return { ...sub, url: proxyUrl(sub.url, subHeaders) };
+      });
+    }
+
+    // Embed-type stream
+    if (streamResult.streamType === 'embed' && streamResult.embedUrl) {
+      return res.json({
+        ok: true,
+        success: true,
+        available: true,
+        provider: streamResult.selectedProvider,
+        selectedProvider: streamResult.selectedProvider,
+        fallbackTriggered: streamResult.fallbackTriggered || false,
+        subjectId: String(tmdbId),
+        streamType: 'embed',
+        embedUrl: streamResult.embedUrl,
+        embedFallbacks: streamResult.embedFallbacks || [],
+        streams: [],
+        subtitles: [],
+        stream: streamResult
+      });
+    }
+
+    // Native stream
+    res.json({
+      ok: true,
+      success: true,
+      available: true,
+      provider: streamResult.selectedProvider,
+      selectedProvider: streamResult.selectedProvider,
+      fallbackTriggered: streamResult.fallbackTriggered || false,
+      subjectId: String(tmdbId),
+      streamType: streamResult.streamType || 'native',
+      streams: streamResult.qualities || [],
+      subtitles: streamResult.subtitles || [],
+      stream: streamResult
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 
 /**
  * Proxy streaming video requests to bypass CORS/Referer protections on stream hosting servers.
