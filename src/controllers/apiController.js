@@ -446,21 +446,25 @@ const apiController = {
 
       // Proxy stream URLs to bypass CORS and Referer restrictions
       const proxyBase = `http://localhost:${config.port}/api/v2/stream/proxy`;
-      const proxyUrl = (originalUrl) => {
+      const proxyUrl = (originalUrl, streamHeaders) => {
         if (!originalUrl) return '';
         if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) {
           return originalUrl;
         }
-        return `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
+        let pUrl = `${proxyBase}?url=${encodeURIComponent(originalUrl)}`;
+        if (streamHeaders && Object.keys(streamHeaders).length > 0) {
+          pUrl += `&headers=${encodeURIComponent(JSON.stringify(streamHeaders))}`;
+        }
+        return pUrl;
       };
 
       if (streamInfo.streamUrl) {
-        streamInfo.streamUrl = proxyUrl(streamInfo.streamUrl);
+        streamInfo.streamUrl = proxyUrl(streamInfo.streamUrl, streamInfo.headers);
       }
       if (streamInfo.qualities && Array.isArray(streamInfo.qualities)) {
         streamInfo.qualities = streamInfo.qualities.map(q => ({
           ...q,
-          url: proxyUrl(q.url)
+          url: proxyUrl(q.url, q.headers || streamInfo.headers)
         }));
       }
 
@@ -687,24 +691,29 @@ const apiController = {
  */
 apiController.proxyStream = async function(req, res, next) {
   try {
-    const { url } = req.query;
+    const { url, headers: queryHeaders } = req.query;
     if (!url) {
       return res.status(400).json({ error: 'Bad Request', message: 'Missing "url" parameter.' });
     }
 
-    const decodedUrl = decodeURIComponent(url);
+    // Express already decodes query parameters once.
+    // We only call decodeURIComponent if the protocol is still encoded,
+    // to preserve nested parameter boundaries for Cloudflare Worker proxies.
+    let targetUrl = url;
+    if (url.startsWith('http%3A%2F%2F') || url.startsWith('https%3A%2F%2F')) {
+      targetUrl = decodeURIComponent(url);
+    }
 
     // Only allow HTTP/HTTPS URLs
-    if (!decodedUrl.startsWith('http://') && !decodedUrl.startsWith('https://')) {
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
       return res.status(400).json({ error: 'Bad Request', message: 'Invalid URL protocol.' });
     }
 
     // Determine target URL. If it's a CDN link from hakunaymatata.com, wrap it in NetMirror's custom Cloudflare Worker proxy
     // (Only if it's not a direct backend download request, since the backend handles CORS natively)
-    let targetUrl = decodedUrl;
     const isDownload = req.query.download === 'true';
-    if (!isDownload && decodedUrl.includes('hakunaymatata.com') && !decodedUrl.includes('streamhub-proxy')) {
-      targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(decodedUrl)}`;
+    if (!isDownload && targetUrl.includes('hakunaymatata.com') && !targetUrl.includes('streamhub-proxy') && !targetUrl.includes('workers.dev')) {
+      targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(targetUrl)}`;
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
     }
 
@@ -718,6 +727,34 @@ apiController.proxyStream = async function(req, res, next) {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Referer': 'https://net27.cc/'
     };
+
+    if (queryHeaders) {
+      try {
+        const parsed = JSON.parse(decodeURIComponent(queryHeaders));
+        Object.keys(parsed).forEach(k => {
+          const lowerKey = k.toLowerCase();
+          if (lowerKey === 'user-agent') {
+            delete headers['User-Agent'];
+            headers['user-agent'] = parsed[k];
+          } else if (lowerKey === 'referer') {
+            delete headers['Referer'];
+            headers['referer'] = parsed[k];
+          } else {
+            headers[k] = parsed[k];
+          }
+        });
+      } catch (e) {
+        logger.warn(`Failed to parse custom query headers: ${e.message}`);
+      }
+    }
+
+    // Omit Referer and Origin headers for Cloudflare Worker proxies to bypass security blocks (403 Forbidden)
+    if (targetUrl.includes('workers.dev')) {
+      delete headers['Referer'];
+      delete headers['referer'];
+      delete headers['Origin'];
+      delete headers['origin'];
+    }
 
     if (req.headers.range) {
       headers['Range'] = req.headers.range;

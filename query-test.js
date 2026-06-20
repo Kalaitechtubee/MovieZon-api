@@ -1,25 +1,79 @@
 const axios = require('axios');
+const { webcrypto } = require('crypto');
 
-async function check() {
-  const url = 'https://net27.cc/api/catalog/search-hybrid?q=Amaran';
+const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
+
+function dC(e) {
+  let t = e.replace(/-/g, "+").replace(/_/g, "/"),
+      i = t.length % 4 == 0 ? "" : "=".repeat(4 - t.length % 4),
+      r = Buffer.from(t + i, 'base64').toString('binary'),
+      s = new Uint8Array(r.length);
+  for (let e = 0; e < r.length; e++) {
+    s[e] = r.charCodeAt(e);
+  }
+  return s;
+}
+
+async function dP(e) {
+  let t = new Uint8Array(e.match(/.{1,2}/g).map(e => parseInt(e, 16)));
+  return await webcrypto.subtle.importKey("raw", t, {name: "AES-GCM"}, false, ["decrypt"]);
+}
+
+async function dD(e, t) {
   try {
-    const res = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://net27.cc/'
-      },
-      validateStatus: false
-    });
-    console.log("Status Code:", res.status);
-    if (res.data && res.data.items) {
-      const match = res.data.items.find(item => String(item.tmdbId) === '927342');
-      console.log("Matched Item in Search:", JSON.stringify(match, null, 2));
-    } else {
-      console.log("No items found.");
-    }
+    let [i, r, s] = e.split(".");
+    let n = dC(i),
+        a = dC(r),
+        l = dC(s);
+    let o = new Uint8Array(a.length + l.length);
+    o.set(a, 0);
+    o.set(l, a.length);
+    let u = await dP(t);
+    let d = await webcrypto.subtle.decrypt({name: "AES-GCM", iv: n}, u, o);
+    let h = new TextDecoder().decode(d);
+    return JSON.parse(h);
   } catch (err) {
-    console.error("Error:", err.message);
+    console.error("Decryption failed:", err.message);
+    return null;
   }
 }
 
-check();
+async function testDecrypt() {
+  const ee = [
+    {label:"Iron",path:"moviebox",apis:["https://uwu.eat-peach.sbs"]},
+    {label:"Spider",path:"holly",apis:["https://usa.eat-peach.sbs"]},
+    {label:"Wolf",path:"air",apis:["https://usa.eat-peach.sbs"]},
+    {label:"Multi",path:"multi",apis:["https://usa.eat-peach.sbs"]},
+    {label:"Dark",path:"net",apis:["https://uwu.eat-peach.sbs"]}
+  ];
+  
+  const tmdbId = "1367220";
+  
+  for (const item of ee) {
+    for (const api of item.apis) {
+      const url = `${api}/${item.path}/movie/${tmdbId}`;
+      console.log(`Querying: ${url}...`);
+      try {
+        const res = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://peachify.top/'
+          }
+        });
+        console.log("Status Code:", res.status);
+        if (res.data && res.data.isEncrypted) {
+          console.log("Found encrypted data! Decrypting...");
+          const decrypted = await dD(res.data.data, keyHex);
+          console.log("Decrypted Response:", JSON.stringify(decrypted, null, 2));
+          return;
+        } else {
+          console.log("Not encrypted or empty response:", res.data);
+        }
+      } catch (err) {
+        console.log(`Failed for ${item.label} (${url}):`, err.message);
+      }
+    }
+  }
+}
+
+testDecrypt();

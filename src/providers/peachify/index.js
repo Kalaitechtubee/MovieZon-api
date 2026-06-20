@@ -1,10 +1,48 @@
 const BaseProvider = require('../BaseProvider');
 const httpClient = require('../../utils/httpClient');
 const logger = require('../../logger');
-const { normalizeCatalogItem } = require('../../provider-normalizer');
+const { normalizeCatalogItem, normalizeStream } = require('../../provider-normalizer');
+const axios = require('axios');
+const { webcrypto } = require('crypto');
 
 const PEACHIFY_BASE = 'https://peachify.top';
 const NETMIRROR_BASE = 'https://net27.cc';
+const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
+
+function dC(e) {
+  let t = e.replace(/-/g, "+").replace(/_/g, "/"),
+      i = t.length % 4 == 0 ? "" : "=".repeat(4 - t.length % 4),
+      r = Buffer.from(t + i, 'base64').toString('binary'),
+      s = new Uint8Array(r.length);
+  for (let e = 0; e < r.length; e++) {
+    s[e] = r.charCodeAt(e);
+  }
+  return s;
+}
+
+async function dP(e) {
+  let t = new Uint8Array(e.match(/.{1,2}/g).map(e => parseInt(e, 16)));
+  return await webcrypto.subtle.importKey("raw", t, {name: "AES-GCM"}, false, ["decrypt"]);
+}
+
+async function dD(e, t) {
+  try {
+    let [i, r, s] = e.split(".");
+    let n = dC(i),
+        a = dC(r),
+        l = dC(s);
+    let o = new Uint8Array(a.length + l.length);
+    o.set(a, 0);
+    o.set(l, a.length);
+    let u = await dP(t);
+    let d = await webcrypto.subtle.decrypt({name: "AES-GCM", iv: n}, u, o);
+    let h = new TextDecoder().decode(d);
+    return JSON.parse(h);
+  } catch (err) {
+    logger.warn(`Decryption failed: ${err.message}`);
+    return null;
+  }
+}
 
 class PeachifyProvider extends BaseProvider {
   constructor() {
@@ -75,13 +113,98 @@ class PeachifyProvider extends BaseProvider {
       embedUrl = `${PEACHIFY_BASE}/embed/movie/${resolvedId}`;
     }
 
-    logger.info(`[Peachify] Returning embed URL: ${embedUrl}`);
+    // Try to scrape direct streams
+    const ee = [
+      {label:"Iron",path:"moviebox",apis:["https://uwu.eat-peach.sbs"]},
+      {label:"Spider",path:"holly",apis:["https://usa.eat-peach.sbs"]},
+      {label:"Wolf",path:"air",apis:["https://usa.eat-peach.sbs"]},
+      {label:"Multi",path:"multi",apis:["https://usa.eat-peach.sbs"]},
+      {label:"Dark",path:"net",apis:["https://uwu.eat-peach.sbs"]}
+    ];
+
+    let decryptedData = null;
+
+    for (const item of ee) {
+      for (const api of item.apis) {
+        let url;
+        if (mediaType === 'tv') {
+          url = `${api}/${item.path}/tv/${resolvedId}/${season}/${episode}`;
+        } else {
+          url = `${api}/${item.path}/movie/${resolvedId}`;
+        }
+        logger.debug(`[Peachify] Trying to fetch stream from API: ${url}`);
+        try {
+          const res = await axios.get(url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Referer': 'https://peachify.top/'
+            },
+            timeout: 4000
+          });
+
+          if (res.data && res.data.isEncrypted && res.data.data) {
+            logger.info(`[Peachify] Decrypting response from ${item.label} (${url})`);
+            const decrypted = await dD(res.data.data, keyHex);
+            if (decrypted && decrypted.sources && decrypted.sources.length > 0) {
+              decryptedData = decrypted;
+              break;
+            }
+          }
+        } catch (err) {
+          logger.debug(`[Peachify] Fetch/Decrypt failed for ${item.label} (${url}): ${err.message}`);
+        }
+      }
+      if (decryptedData) break;
+    }
+
+    if (decryptedData) {
+      logger.info(`[Peachify] Successfully resolved direct native streams!`);
+
+      // Normalize qualities
+      const qualities = decryptedData.sources.map(s => {
+        let qStr = '1080p';
+        if (s.quality) {
+          qStr = String(s.quality).endsWith('p') ? String(s.quality) : `${s.quality}p`;
+        } else if (s.type === 'm3u8') {
+          qStr = 'HLS';
+        }
+        return {
+          quality: qStr,
+          url: s.url || '',
+          headers: s.headers || {}
+        };
+      });
+
+      // Normalize subtitles
+      const subtitles = (decryptedData.subtitles || []).map(sub => ({
+        lang: sub.langCode || 'en',
+        name: sub.label || 'English',
+        url: sub.url || ''
+      }));
+
+      // Find best default streamUrl (prefer HLS/m3u8, then first quality)
+      const hlsStream = decryptedData.sources.find(s => s.type === 'm3u8');
+      const firstStream = decryptedData.sources[0];
+      const streamUrl = hlsStream ? hlsStream.url : (firstStream ? firstStream.url : '');
+      const streamHeaders = hlsStream ? hlsStream.headers : (firstStream ? firstStream.headers : {});
+
+      return normalizeStream({
+        drm: false,
+        streamUrl,
+        qualities,
+        subtitles,
+        headers: streamHeaders
+      }, 'peachify');
+    }
+
+    // Fallback if scraping/decryption failed
+    logger.warn(`[Peachify] No direct stream resolved. Returning fallback embed URL: ${embedUrl}`);
 
     return {
       provider: 'peachify',
       drm: false,
       streamUrl: '',
-      embedUrl,           // ← special field: frontend should render this in an <iframe>
+      embedUrl,
       streamType: 'embed',
       subtitles: [],
       headers: {},

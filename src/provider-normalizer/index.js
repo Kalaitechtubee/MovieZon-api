@@ -54,7 +54,8 @@ function normalizeStream(data, providerName) {
   const qualities = Array.isArray(data.qualities)
     ? data.qualities.map(q => ({
         quality: String(q.quality || q.resolution || '1080p').endsWith('p') ? String(q.quality || q.resolution || '1080p') : `${q.quality || q.resolution || '1080'}p`,
-        url: q.url || ''
+        url: q.url || '',
+        headers: q.headers
       }))
     : [];
 
