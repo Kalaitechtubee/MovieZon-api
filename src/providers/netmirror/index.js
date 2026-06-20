@@ -434,10 +434,10 @@ class NetMirrorProvider extends BaseProvider {
           const res = await axios.get(targetUrl, axiosOptions);
 
           if (res.status === 403 || res.status === 404) {
-            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found).`);
-            if (config.isDev) {
-              throw new Error(`Stream CDN returned status ${res.status}`);
-            }
+            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/expired). Discarding stream.`);
+            // Always throw so the cross-provider fallback in apiController activates,
+            // both in development and production.
+            throw new Error(`Stream CDN returned ${res.status} - URL may be expired or IP-restricted`);
           } else {
             logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
           }

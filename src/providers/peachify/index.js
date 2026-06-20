@@ -63,9 +63,19 @@ class PeachifyProvider extends BaseProvider {
       return await axios.get(url, reqOptions);
     } catch (err) {
       logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
-      const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}`;
+      // Encode the required headers into the query string so the CF worker
+      // forwards them to eat-peach.sbs. This allows fetching even when
+      // the server's IP (e.g. Render's) is blocked by the upstream API.
+      const headersToForward = options.headers
+        ? JSON.stringify(options.headers)
+        : JSON.stringify({
+            'Referer': 'https://peachify.top/',
+            'Origin': 'https://peachify.top',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          });
+      const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
       try {
-        const res = await axios.get(proxyUrl, options);
+        const res = await axios.get(proxyUrl, { timeout: options.timeout || 8000 });
         logger.info(`[Peachify Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
         return res;
       } catch (proxyErr) {

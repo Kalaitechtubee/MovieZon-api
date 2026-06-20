@@ -412,12 +412,12 @@ const apiController = {
         });
       }
 
-      // Extract client IP (handling reverse proxies)
-      // For download requests, do not forward client IP to generate signatures locked to the server IP instead
+      // Always use null for clientIp so CDN URLs (e.g. hakunaymatata.com) are signed
+      // for the backend server's IP address. Since ALL stream URLs are routed through
+      // the backend proxy (/api/v2/stream/proxy), the backend server fetches the CDN
+      // using the same IP — preventing 403 Forbidden errors from IP-locked signed tokens.
       const isDownload = req.query.download === 'true';
-      const clientIp = isDownload ? null : (req.headers['x-forwarded-for']
-        ? req.headers['x-forwarded-for'].split(',')[0].trim()
-        : req.socket.remoteAddress);
+      const clientIp = null;
 
       let streamInfo = null;
       try {
@@ -432,6 +432,37 @@ const apiController = {
         );
       } catch (err) {
         logger.warn(`Could not retrieve stream for provider ${provider} ID ${parsedId}: ${err.message}`);
+      }
+
+      // --- CROSS-PROVIDER FALLBACK ---
+      // If the primary provider (NetMirror) failed or returned expired/empty streams,
+      // automatically fall back to Peachify before returning 404.
+      const isNetmirror = provider.toLowerCase() === 'netmirror';
+      const hasValidStreams = streamInfo && (
+        (streamInfo.qualities && streamInfo.qualities.length > 0) ||
+        (streamInfo.streamUrl && streamInfo.streamUrl.length > 0) ||
+        (streamInfo.streamType === 'embed' && streamInfo.embedUrl)
+      );
+
+      if (!hasValidStreams && isNetmirror) {
+        logger.info(`[Stream] NetMirror returned no valid stream for ID ${parsedId}. Attempting Peachify fallback...`);
+        try {
+          const peachifyInfo = await providerManager.stream(
+            'peachify',
+            parsedId,
+            parsedType.toLowerCase(),
+            seasonNum,
+            episodeNum,
+            null,
+            null
+          );
+          if (peachifyInfo) {
+            streamInfo = peachifyInfo;
+            logger.info(`[Stream] Peachify fallback succeeded for ID ${parsedId} (streamType: ${peachifyInfo.streamType || 'native'})`);
+          }
+        } catch (peachErr) {
+          logger.warn(`[Stream] Peachify fallback also failed for ID ${parsedId}: ${peachErr.message}`);
+        }
       }
 
       if (!streamInfo) {

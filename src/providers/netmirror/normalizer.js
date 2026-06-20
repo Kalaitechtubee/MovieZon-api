@@ -52,8 +52,9 @@ function normalizeNetMirrorStream(embedData) {
       const urlObj = new URL(testUrl);
       const t = urlObj.searchParams.get('t');
       if (t) {
-        // 't' is the generation timestamp. The secure token is valid for 2 hours (7200 seconds).
-        expires = parseInt(t, 10) + 7200;
+        // 't' is the generation timestamp. The secure token is valid for 1 hour (3600 seconds).
+        // We use a 5-minute buffer so tokens are rejected before they actually expire.
+        expires = parseInt(t, 10) + 3600 - 300;
       }
     } catch (e) {
       // Ignored
