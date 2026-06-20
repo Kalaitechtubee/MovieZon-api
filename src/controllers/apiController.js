@@ -730,7 +730,8 @@ apiController.proxyStream = async function(req, res, next) {
 
     if (queryHeaders) {
       try {
-        const parsed = JSON.parse(decodeURIComponent(queryHeaders));
+        const rawHeaders = Array.isArray(queryHeaders) ? queryHeaders[queryHeaders.length - 1] : queryHeaders;
+        const parsed = JSON.parse(decodeURIComponent(rawHeaders));
         Object.keys(parsed).forEach(k => {
           const lowerKey = k.toLowerCase();
           if (lowerKey === 'user-agent') {
