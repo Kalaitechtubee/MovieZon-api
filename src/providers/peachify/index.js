@@ -10,8 +10,27 @@ const PEACHIFY_BASE = 'https://peachify.top';
 const NETMIRROR_BASE = 'https://net27.cc';
 const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
 
+const { URL } = require('url');
 let proxyConfig = null;
-// Outgoing proxy is disabled globally to prevent connection blocks and routing issues.
+if (config.proxyUrl) {
+  try {
+    const parsedProxy = new URL(config.proxyUrl);
+    proxyConfig = {
+      protocol: parsedProxy.protocol.replace(':', ''),
+      host: parsedProxy.hostname,
+      port: parseInt(parsedProxy.port, 10),
+    };
+    if (parsedProxy.username || parsedProxy.password) {
+      proxyConfig.auth = {
+        username: decodeURIComponent(parsedProxy.username),
+        password: decodeURIComponent(parsedProxy.password)
+      };
+    }
+    logger.info(`[Peachify] Proxy configured successfully: ${proxyConfig.host}:${proxyConfig.port}`);
+  } catch (e) {
+    logger.warn(`[Peachify] Failed to parse PROXY_URL: ${e.message}`);
+  }
+}
 
 
 function dC(e) {
