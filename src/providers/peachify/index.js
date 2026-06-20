@@ -4,10 +4,32 @@ const logger = require('../../logger');
 const { normalizeCatalogItem, normalizeStream } = require('../../provider-normalizer');
 const axios = require('axios');
 const { webcrypto } = require('crypto');
+const config = require('../../config');
 
 const PEACHIFY_BASE = 'https://peachify.top';
 const NETMIRROR_BASE = 'https://net27.cc';
 const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
+
+let proxyConfig = null;
+if (config.proxyUrl) {
+  try {
+    const parsed = new URL(config.proxyUrl);
+    proxyConfig = {
+      protocol: parsed.protocol.replace(':', ''),
+      host: parsed.hostname,
+      port: parseInt(parsed.port, 10) || (parsed.protocol === 'https:' ? 443 : 80)
+    };
+    if (parsed.username || parsed.password) {
+      proxyConfig.auth = {
+        username: decodeURIComponent(parsed.username),
+        password: decodeURIComponent(parsed.password)
+      };
+    }
+    logger.info(`[Peachify] Configured outgoing Axios proxy: ${proxyConfig.host}:${proxyConfig.port}`);
+  } catch (e) {
+    logger.warn(`[Peachify] Failed to parse PROXY_URL: ${e.message}`);
+  }
+}
 
 function dC(e) {
   let t = e.replace(/-/g, "+").replace(/_/g, "/"),
@@ -50,8 +72,12 @@ class PeachifyProvider extends BaseProvider {
   }
 
   async peachifyGet(url, options = {}) {
+    const reqOptions = { ...options };
+    if (proxyConfig) {
+      reqOptions.proxy = proxyConfig;
+    }
     try {
-      return await axios.get(url, options);
+      return await axios.get(url, reqOptions);
     } catch (err) {
       logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
       const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}`;

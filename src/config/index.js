@@ -6,6 +6,7 @@ const config = {
   env: process.env.NODE_ENV || 'development',
   isDev: (process.env.NODE_ENV || 'development') === 'development' && !process.env.RENDER,
   cacheTtl: parseInt(process.env.CACHE_TTL, 10) || 3600,
+  proxyUrl: process.env.PROXY_URL || null,
   
   // Providers config
   providerPriority: (process.env.PROVIDER_PRIORITY || 'netmirror')
