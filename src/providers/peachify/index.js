@@ -49,6 +49,23 @@ class PeachifyProvider extends BaseProvider {
     super('peachify');
   }
 
+  async peachifyGet(url, options = {}) {
+    try {
+      return await axios.get(url, options);
+    } catch (err) {
+      logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+      const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}`;
+      try {
+        const res = await axios.get(proxyUrl, options);
+        logger.info(`[Peachify Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
+        return res;
+      } catch (proxyErr) {
+        logger.error(`[Peachify Proxy] Proxy request also failed: ${proxyErr.message}`);
+        throw err;
+      }
+    }
+  }
+
   /**
    * Search - not directly supported by Peachify; always returns empty.
    * Search is handled by TMDB / NetMirror.
@@ -134,7 +151,7 @@ class PeachifyProvider extends BaseProvider {
         }
         logger.debug(`[Peachify] Trying to fetch stream from API: ${url}`);
         try {
-          const res = await axios.get(url, {
+          const res = await this.peachifyGet(url, {
             headers: {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               'Accept': 'application/json, text/plain, */*',
