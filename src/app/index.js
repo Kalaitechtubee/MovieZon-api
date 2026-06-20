@@ -21,7 +21,7 @@ app.use(
 );
 app.use(cors());
 
-// Serve static assets from public folder
+// Serve static assets from public folder.
 app.use(express.static(path.join(__dirname, '../../public')));
 
 // Body Parsers
