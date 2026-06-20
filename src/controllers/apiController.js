@@ -341,12 +341,11 @@ const apiController = {
       finalDetails.sources = sources;
 
       // --- SERVER 2 (PEACHIFY) SAFETY NET ---
-      // If Peachify wasn't already added via availability check (e.g. timed out),
-      // add it manually as Server 2 when NetMirror has no stream.
-      const hasNetmirrorSource = sources.some(s => s.provider === 'netmirror');
+      // Ensure Peachify (Server 2) is always added as a source if it is not already present,
+      // so the client can always switch to Server 2 as a fallback.
       const hasPeachifySource = sources.some(s => s.provider === 'peachify');
-      if (!hasNetmirrorSource && !hasPeachifySource) {
-        logger.info(`[UnifiedDetails] No NetMirror stream for ID ${id}. Adding Peachify (Server 2) as safety-net source.`);
+      if (!hasPeachifySource) {
+        logger.info(`[UnifiedDetails] Adding Peachify (Server 2) as fallback source for ID ${id}.`);
         sources.push({
           provider: 'peachify',
           id: String(id),
