@@ -767,10 +767,37 @@ apiController.proxyStream = async function(req, res, next) {
       return res.status(400).json({ error: 'Bad Request', message: 'Invalid URL protocol.' });
     }
 
+    // Extract nested target URL if wrapped in eat-peach.sbs / peachify proxy
+    try {
+      const parsed = new URL(targetUrl);
+      if ((parsed.hostname.includes('eat-peach.sbs') || parsed.hostname.includes('peachify')) && parsed.searchParams.has('url')) {
+        const nested = parsed.searchParams.get('url');
+        if (nested && (nested.startsWith('http://') || nested.startsWith('https://'))) {
+          logger.info(`[ProxyStream] Extracting nested target URL from proxy wrapper: ${nested}`);
+          targetUrl = nested;
+        }
+      }
+    } catch (e) {
+      // ignore invalid URL parsing
+    }
+
     // Determine target URL. If it's a CDN link from hakunaymatata.com, wrap it in NetMirror's custom Cloudflare Worker proxy
     // (Only if it's not a direct backend download request, since the backend handles CORS natively)
     const isDownload = req.query.download === 'true';
-    if (!isDownload && targetUrl.includes('hakunaymatata.com') && !targetUrl.includes('streamhub-proxy') && !targetUrl.includes('workers.dev')) {
+    let targetHost = '';
+    try {
+      targetHost = new URL(targetUrl).hostname;
+    } catch (e) {
+      const hostMatch = targetUrl.match(/^(?:https?:\/\/)?([^/?:#]+)/i);
+      if (hostMatch) {
+        targetHost = hostMatch[1];
+      }
+    }
+    const isSubtitle = targetUrl.toLowerCase().includes('.srt') || 
+                       targetUrl.toLowerCase().includes('.vtt') ||
+                       targetUrl.includes('/msubt/') ||
+                       targetUrl.includes('/subtitle/');
+    if (!isDownload && !isSubtitle && targetHost.endsWith('hakunaymatata.com') && !targetHost.includes('streamhub-proxy') && !targetHost.includes('workers.dev')) {
       targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(targetUrl)}`;
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
     }
