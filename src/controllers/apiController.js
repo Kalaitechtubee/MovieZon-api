@@ -763,6 +763,57 @@ apiController.proxyStream = async function(req, res, next) {
       headers['Range'] = req.headers.range;
     }
 
+    // Detect HLS/m3u8 playlists and rewrite segment URLs to route through the backend proxy
+    const isM3u8Url = targetUrl.split('?')[0].endsWith('.m3u8') || 
+                      targetUrl.includes('hls-proxy') || 
+                      targetUrl.includes('m3u8') || 
+                      targetUrl.includes('/hls/');
+    if (isM3u8Url) {
+      logger.info(`[ProxyStream] Detected HLS playlist. Fetching and rewriting URLs for: ${targetUrl}`);
+      try {
+        const response = await axios({
+          method: 'get',
+          url: targetUrl,
+          headers,
+          responseType: 'text',
+          validateStatus: false
+        });
+
+        res.status(response.status);
+        res.setHeader('Content-Type', response.headers['content-type'] || 'application/vnd.apple.mpegurl');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges, Content-Disposition');
+
+        const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+        const host = req.get('host');
+        const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+
+        const lines = response.data.split(/\r?\n/);
+        const rewrittenLines = lines.map(line => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) {
+            return line;
+          }
+          try {
+            const absoluteUrl = new URL(trimmed, targetUrl).toString();
+            let rewrittenUrl = `${proxyBase}?url=${encodeURIComponent(absoluteUrl)}`;
+            if (queryHeaders) {
+              rewrittenUrl += `&headers=${queryHeaders}`;
+            }
+            return rewrittenUrl;
+          } catch (e) {
+            return line;
+          }
+        });
+
+        res.send(rewrittenLines.join('\n'));
+        return;
+      } catch (err) {
+        logger.error(`HLS playlist rewriting failed: ${err.message}`);
+        // fallback to default stream proxying below if rewrite fails
+      }
+    }
+
     logger.debug(`Proxying stream to: ${targetUrl} (Range: ${req.headers.range || 'All'})`);
 
     const response = await axios({
