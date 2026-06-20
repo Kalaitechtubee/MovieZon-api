@@ -481,6 +481,7 @@ const apiController = {
           subjectId: id,
           streamType: 'embed',
           embedUrl: streamInfo.embedUrl,
+          embedFallbacks: streamInfo.embedFallbacks || [],
           streams: [],
           subtitles: [],
           stream: streamInfo
