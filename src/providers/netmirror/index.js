@@ -15,6 +15,33 @@ class NetMirrorProvider extends BaseProvider {
     this.variantToTmdb = new Map(); // variant ID -> { tmdbId, type } mapping
     this.initializeCaptureData();
     this.loadDynamicVariants();
+    this.initializeProxy();
+  }
+
+  /**
+   * Parse PROXY_URL for connectivity checks
+   */
+  initializeProxy() {
+    this.proxyConfig = null;
+    if (config.proxyUrl) {
+      try {
+        const parsed = new URL(config.proxyUrl);
+        this.proxyConfig = {
+          protocol: parsed.protocol.replace(':', ''),
+          host: parsed.hostname,
+          port: parseInt(parsed.port, 10) || (parsed.protocol === 'https:' ? 443 : 80)
+        };
+        if (parsed.username || parsed.password) {
+          this.proxyConfig.auth = {
+            username: decodeURIComponent(parsed.username),
+            password: decodeURIComponent(parsed.password)
+          };
+        }
+        logger.info(`[NetMirror] Configured outgoing Axios proxy for connectivity checks: ${this.proxyConfig.host}:${this.proxyConfig.port}`);
+      } catch (e) {
+        logger.warn(`[NetMirror] Failed to parse PROXY_URL: ${e.message}`);
+      }
+    }
   }
 
   /**
@@ -401,39 +428,41 @@ class NetMirrorProvider extends BaseProvider {
       }
 
       // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link
-      // Only run this HTTP check in development to avoid datacenter IP bans/Cloudflare blocks on production (Render)
+      // Run this HTTP check in both development and production, using the proxy if configured
       const testUrl = normalized.streamUrl || (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
       if (testUrl) {
-        if (config.isDev) {
-          logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
-          
-          let targetUrl = testUrl;
-          if (testUrl.includes('hakunaymatata.com') && !testUrl.includes('streamhub-proxy')) {
-            targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(testUrl)}`;
+        logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
+        
+        let targetUrl = testUrl;
+        if (testUrl.includes('hakunaymatata.com') && !testUrl.includes('streamhub-proxy') && !testUrl.includes('workers.dev')) {
+          targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(testUrl)}`;
+        }
+
+        try {
+          const axiosOptions = {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Referer': `${config.netmirror.baseUrl}/`,
+              'Range': 'bytes=0-10'
+            },
+            timeout: 3000,
+            validateStatus: false
+          };
+
+          if (this.proxyConfig) {
+            axiosOptions.proxy = this.proxyConfig;
           }
 
-          try {
-            const res = await axios.get(targetUrl, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': `${config.netmirror.baseUrl}/`,
-                'Range': 'bytes=0-10'
-              },
-              timeout: 3000,
-              validateStatus: false
-            });
+          const res = await axios.get(targetUrl, axiosOptions);
 
-            if (res.status === 403 || res.status === 404) {
-              logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found). Discarding NetMirror stream.`);
-              throw new Error(`Stream CDN returned status ${res.status}`);
-            }
-            logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
-          } catch (err) {
-            logger.warn(`[NetMirror] Stream check failed: ${err.message}. Triggering provider fallback.`);
-            throw err;
+          if (res.status === 403 || res.status === 404) {
+            logger.warn(`[NetMirror] Stream URL check returned status ${res.status} (forbidden/not found). Discarding NetMirror stream.`);
+            throw new Error(`Stream CDN returned status ${res.status}`);
           }
-        } else {
-          logger.info(`[NetMirror] Skipping HTTP connectivity check in production for ID ${resolvedId}.`);
+          logger.info(`[NetMirror] Stream URL check verified working (Status: ${res.status}).`);
+        } catch (err) {
+          logger.warn(`[NetMirror] Stream check failed: ${err.message}. Triggering provider fallback.`);
+          throw err;
         }
       }
     }
