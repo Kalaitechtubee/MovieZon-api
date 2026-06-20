@@ -2,8 +2,28 @@ const axios = require('axios');
 const config = require('../config');
 const logger = require('../logger');
 
-// Create Axios Instance
-const client = axios.create({
+let proxyConfig = null;
+if (config.proxyUrl) {
+  try {
+    const parsed = new URL(config.proxyUrl);
+    proxyConfig = {
+      protocol: parsed.protocol.replace(':', ''),
+      host: parsed.hostname,
+      port: parseInt(parsed.port, 10) || (parsed.protocol === 'https:' ? 443 : 80)
+    };
+    if (parsed.username || parsed.password) {
+      proxyConfig.auth = {
+        username: decodeURIComponent(parsed.username),
+        password: decodeURIComponent(parsed.password)
+      };
+    }
+    logger.info(`[HttpClient] Configured outgoing Axios proxy: ${proxyConfig.host}:${proxyConfig.port}`);
+  } catch (e) {
+    logger.warn(`[HttpClient] Failed to parse PROXY_URL: ${e.message}`);
+  }
+}
+
+const clientOptions = {
   timeout: config.http.timeout,
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -11,7 +31,14 @@ const client = axios.create({
     'Accept-Language': 'en-US,en;q=0.9',
     'Referer': 'https://net27.cc/'
   }
-});
+};
+
+if (proxyConfig) {
+  clientOptions.proxy = proxyConfig;
+}
+
+// Create Axios Instance
+const client = axios.create(clientOptions);
 
 // Axios Request Interceptor for logging
 client.interceptors.request.use((req) => {

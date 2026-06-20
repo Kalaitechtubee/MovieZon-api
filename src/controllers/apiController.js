@@ -445,7 +445,9 @@ const apiController = {
       }
 
       // Proxy stream URLs to bypass CORS and Referer restrictions
-      const proxyBase = `http://localhost:${config.port}/api/v2/stream/proxy`;
+      const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      const host = req.get('host');
+      const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
       const proxyUrl = (originalUrl, streamHeaders) => {
         if (!originalUrl) return '';
         if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) {
