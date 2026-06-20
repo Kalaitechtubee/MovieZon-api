@@ -241,11 +241,34 @@ class PeachifyProvider extends BaseProvider {
       const streamUrl = hlsStream ? hlsStream.url : (firstStream ? firstStream.url : '');
       const streamHeaders = hlsStream ? hlsStream.headers : (firstStream ? firstStream.headers : {});
 
+      // Parse expiration timestamp from the stream URL if present
+      let expires = null;
+      if (streamUrl) {
+        try {
+          let urlToParse = streamUrl;
+          if (streamUrl.includes('url=')) {
+            const match = streamUrl.match(/url=([^&]+)/);
+            if (match) {
+              urlToParse = decodeURIComponent(match[1]);
+            }
+          }
+          const urlObj = new URL(urlToParse);
+          const t = urlObj.searchParams.get('t');
+          if (t) {
+            // 't' is the generation timestamp. The secure token is valid for 1 hour (3600 seconds).
+            expires = parseInt(t, 10) + 3600;
+          }
+        } catch (e) {
+          logger.debug(`[Peachify] Failed to parse expires from stream URL: ${e.message}`);
+        }
+      }
+
       return normalizeStream({
         drm: false,
         streamUrl,
         qualities,
         subtitles,
+        expires,
         headers: streamHeaders
       }, 'peachify');
     }
