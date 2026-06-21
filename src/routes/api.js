@@ -1,5 +1,6 @@
 const express = require('express');
 const apiController = require('../controllers/apiController');
+const historyController = require('../controllers/historyController');
 
 const router = express.Router();
 
@@ -33,6 +34,12 @@ router.get('/v2/stream/:provider/:id', apiController.stream);
 router.get('/v2/tmdb/:category', apiController.tmdbList);
 router.get('/v2/tmdb/season/:tmdbId/:seasonNumber', apiController.seasonEpisodes);
 router.get('/v2/stream/proxy', apiController.proxyStream);
+
+// ─── Watch History Routes ─────────────────────────────────────────────────────
+router.get('/v2/history', historyController.getHistory);
+router.post('/v2/history', historyController.saveHistory);
+router.delete('/v2/history/:type/:id', historyController.removeHistory);
+router.delete('/v2/history', historyController.clearHistory);
 
 module.exports = router;
 

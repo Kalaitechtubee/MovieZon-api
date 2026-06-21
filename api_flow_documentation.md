@@ -599,7 +599,7 @@ Proxies raw video binary streams to bypass CORS, Referer, and IP-restriction che
 | **CF Worker redirection** | `hakunaymatata.com` URL (playback, not download/subtitle) | Redirect through `streamhub-proxy` to save backend bandwidth |
 | **Direct CDN fetch** | `hakunaymatata.com` URL + `download=true` or subtitle | Fetch directly from Render server (IP-signed token compatibility) |
 | **Strip worker headers** | URL contains `workers.dev` | Remove `Referer`, `Origin`, `User-Agent` |
-| **HLS rewriting** | URL ends in `.m3u8` | Fetch playlist, rewrite segment URLs through this proxy |
+| **HLS rewriting** | URL ends in `.m3u8` or contains HLS paths | Fetch playlist, rewrite segment URLs and relative/absolute URI attributes inside comment lines (e.g., `#EXT-X-MEDIA` alternate audio tracks, `#EXT-X-KEY` keys) to route through this proxy |
 | **Range passthrough** | Client sends `Range: bytes=x-y` | Forward Range header; return `206 Partial Content` |
 
 ---
@@ -695,7 +695,7 @@ Render's datacenter IP is blocked by `eat-peach.sbs`. Peachify bypasses this by 
 CDN tokens contain a `t` Unix timestamp (generation time). Tokens are treated as valid for `3600 − 60 = 3540 seconds`. The 60-second early-rejection buffer ensures the client never receives a URL that expires mid-playback.
 
 ### Test Coverage
-All architectural rules are enforced by the integration test suite in `src/__tests__/pipeline.test.js` (34 tests, 7 suites — run with `node --test src/__tests__/pipeline.test.js`):
+All architectural rules are enforced by the integration test suite in `src/__tests__/pipeline.test.js` (38 tests, 9 suites — run with `node --test src/__tests__/pipeline.test.js`):
 
 | Suite | Coverage |
 |---|---|
@@ -706,3 +706,6 @@ All architectural rules are enforced by the integration test suite in `src/__tes
 | Provider Priority ordering | `getSortedProviders()` determinism |
 | Peachify Resilient Get | Direct, proxy, worker proxy, proxy bypass |
 | NetMirror Provider Stream Resolution | Variant list capping to 5, direct request 429 propagation, playability/direct fallback |
+| Stream Caching & Pipeline Caching | Cache hit reuse, variant-keyed pipeline caching |
+| HLS Playlist Rewriting | Comment URI rewriting for alternate audio / multi-language and keys |
+https://peachify/

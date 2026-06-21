@@ -11,6 +11,7 @@ const healthService = require('./provider-health');
 
 
 // Create HTTP Server
+// Trigger reload
 const server = http.createServer(app);
 
 // Start Server

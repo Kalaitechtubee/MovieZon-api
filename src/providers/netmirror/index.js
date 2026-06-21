@@ -44,12 +44,12 @@ class NetMirrorProvider extends BaseProvider {
       const absoluteUrl = urlStr.startsWith('http') ? urlStr : `https://net27.cc${urlStr}`;
       const url = new URL(absoluteUrl);
       const pathname = url.pathname;
-      
+
       // Sort query parameters alphabetically to ensure deterministic lookup
       const params = Array.from(url.searchParams.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
         .filter(([k]) => k !== 't' && k !== 'sign'); // remove signature tokens that change over time
-        
+
       const paramStr = params.map(([k, v]) => `${k}=${v}`).join('&');
       return `${pathname}${paramStr ? '?' + paramStr : ''}`;
     } catch (e) {
@@ -93,7 +93,7 @@ class NetMirrorProvider extends BaseProvider {
               const mediaType = match[1];
               const tmdbId = match[2];
               const resObj = JSON.parse(req.responseBody);
-              
+
               const registerVariant = (vId) => {
                 if (vId) {
                   this.variantToTmdb.set(String(vId), { tmdbId, type: mediaType });
@@ -117,7 +117,7 @@ class NetMirrorProvider extends BaseProvider {
           // Extract search items
           try {
             const resObj = JSON.parse(req.responseBody);
-            
+
             const addSearchItem = (item) => {
               if (!item || !item.tmdbId) return;
               const id = String(item.tmdbId);
@@ -206,18 +206,18 @@ class NetMirrorProvider extends BaseProvider {
   async search(query) {
     logger.debug(`[NetMirror] search() called with query: ${query}`);
     const qLower = query.toLowerCase().trim();
-    
+
     // Search local database extracted from capture file
     const matches = [];
     for (const item of this.catalogItems.values()) {
       const titleMatch = item.title && item.title.toLowerCase().includes(qLower);
       const overviewMatch = item.overview && item.overview.toLowerCase().includes(qLower);
-      
+
       if (titleMatch || overviewMatch) {
         matches.push(normalizeNetMirrorItem(item));
       }
     }
-    
+
     logger.debug(`[NetMirror] Search matched ${matches.length} item(s) locally`);
     return matches;
   }
@@ -239,21 +239,21 @@ class NetMirrorProvider extends BaseProvider {
       throw new Error('Provider returned non-success JSON');
     } catch (err) {
       logger.warn(`[NetMirror] Live request failed for details. Falling back to capture data. Error: ${err.message}`);
-      
+
       // 2. Fallback to capture
       const captured = this.getCapturedResponse(detailUrl);
       if (captured) {
         captured.tmdbId = captured.tmdbId || id;
         return normalizeNetMirrorItem(captured);
       }
-      
+
       // 3. Fallback to catalog items database
       const localItem = this.catalogItems.get(String(id));
       if (localItem) {
         logger.info(`[NetMirror] Serving basic details from catalog db for ID: ${id}`);
         return normalizeNetMirrorItem(localItem);
       }
-      
+
       throw new Error(`Details for ID ${id} not found in live API or local capture.`);
     }
   }
@@ -263,7 +263,7 @@ class NetMirrorProvider extends BaseProvider {
    */
   async stream(id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
     logger.debug(`[NetMirror] stream() called for ID: ${id}, Type: ${type}, Season: ${season}, Episode: ${episode}, Variant: ${variantId}, Client IP: ${clientIp}`);
-    
+
     let resolvedId = id;
     let resolvedType = type;
     const mapping = this.variantToTmdb.get(String(id));
@@ -331,10 +331,24 @@ class NetMirrorProvider extends BaseProvider {
       }
 
       // Build priority-ordered variant list
-      allVariants = (variantsData.variants || []).map(v => ({
+      allVariants = [];
+      if (variantsData.defaultSubjectId) {
+        allVariants.push({
+          id: String(variantsData.defaultSubjectId),
+          language: 'English (Original)'
+        });
+      }
+
+      const otherVariants = (variantsData.variants || []).map(v => ({
         id: String(v.dubSubjectId || v.id),
         language: v.language || 'Default'
       }));
+
+      otherVariants.forEach(ov => {
+        if (!allVariants.some(v => v.id === ov.id)) {
+          allVariants.push(ov);
+        }
+      });
 
       const seenIds = new Set();
       const enqueue = (vid) => {
@@ -474,6 +488,7 @@ class NetMirrorProvider extends BaseProvider {
         // This variant is playable -- return it
         logger.info(`[NetMirror] Variant ${candidateVariantId} is playable for ID ${resolvedId}.`);
         normalized.variants = allVariants;
+        normalized.selectedVariantId = candidateVariantId;
         return normalized;
       }
     }
@@ -510,7 +525,10 @@ class NetMirrorProvider extends BaseProvider {
 
       if (isPlayable) {
         logger.info(`[NetMirror] Direct embed succeeded for ID ${resolvedId}`);
-        normalized.variants = [];
+        normalized.variants = allVariants;
+        normalized.selectedVariantId = variantsData && variantsData.defaultSubjectId
+          ? String(variantsData.defaultSubjectId)
+          : (allVariants[0] ? allVariants[0].id : null);
         return normalized;
       } else {
         logger.warn(`[NetMirror] Direct embed response for ID ${resolvedId} contains no playable stream (mode: ${directEmbedData.mode || 'unknown'}, error: ${directEmbedData.error || 'none'}).`);
@@ -560,10 +578,10 @@ class NetMirrorProvider extends BaseProvider {
       };
     } catch (err) {
       const duration = Date.now() - startTime;
-      
+
       // If server is rate-limited (429) or Cloudflare-blocked (403), we report it as degraded
       const status = err.response && [403, 429].includes(err.response.status) ? 'degraded' : 'unhealthy';
-      
+
       return {
         status,
         message: `HTTP connection failed: ${err.message}`,

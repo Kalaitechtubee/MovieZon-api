@@ -19,6 +19,217 @@ function logPipelineResult(tmdbId, type, entries, selectedProvider, totalMs) {
   }));
 }
 
+const axios = require('axios');
+
+async function parseMasterM3u8(m3u8Url, requestHeaders) {
+  try {
+    logger.info(`[HLS Parser] Fetching and parsing master playlist: ${m3u8Url}`);
+    const response = await axios.get(m3u8Url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        ...(requestHeaders || {})
+      },
+      timeout: 5000
+    });
+
+    const playlistText = response.data;
+    if (typeof playlistText !== 'string') return null;
+
+    const audioTracks = [];
+    const subtitleTracks = [];
+    const qualitiesSet = new Set();
+
+    const parseAttributes = (attrStr) => {
+      const attrs = {};
+      const regex = /([^=\s,]+)=(?:"([^"]*)"|([^,\s]*))/g;
+      let match;
+      while ((match = regex.exec(attrStr)) !== null) {
+        attrs[match[1]] = match[2] || match[3];
+      }
+      return attrs;
+    };
+
+    const lines = playlistText.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('#EXT-X-MEDIA:')) {
+        const attributes = parseAttributes(trimmed.substring(13));
+        const type = attributes['TYPE'];
+        if (type === 'AUDIO') {
+          const langCode = attributes['LANGUAGE'] || attributes['NAME']?.toLowerCase() || 'und';
+          const name = attributes['NAME'] || langCode;
+          const isDefault = attributes['DEFAULT'] === 'YES';
+          const trackId = attributes['GROUP-ID'] || langCode;
+
+          const standardLang = langCode.substring(0, 3).toLowerCase();
+
+          audioTracks.push({
+            id: standardLang,
+            name: name,
+            language: standardLang,
+            default: isDefault
+          });
+        } else if (type === 'SUBTITLES') {
+          const langCode = attributes['LANGUAGE'] || attributes['NAME']?.toLowerCase() || 'und';
+          const name = attributes['NAME'] || langCode;
+          const isDefault = attributes['DEFAULT'] === 'YES';
+          const uri = attributes['URI'];
+          const trackId = attributes['GROUP-ID'] || langCode;
+
+          let subUrl = uri ? new URL(uri, m3u8Url).toString() : '';
+
+          subtitleTracks.push({
+            id: trackId,
+            name: name,
+            language: langCode.substring(0, 3).toLowerCase(),
+            url: subUrl,
+            default: isDefault
+          });
+        }
+      } else if (trimmed.startsWith('#EXT-X-STREAM-INF:')) {
+        const attributes = parseAttributes(trimmed.substring(18));
+        const resolution = attributes['RESOLUTION'];
+        if (resolution) {
+          const height = resolution.split('x')[1];
+          if (height) {
+            qualitiesSet.add(parseInt(height, 10));
+          }
+        }
+      }
+    }
+
+    return {
+      audioTracks,
+      subtitleTracks,
+      qualities: Array.from(qualitiesSet).sort((a, b) => b - a)
+    };
+  } catch (err) {
+    logger.warn(`[HLS Parser] Failed to parse master M3U8: ${err.message}`);
+    return null;
+  }
+}
+
+async function parseAndEnrichHls(streamData) {
+  if (!streamData || !streamData.streamUrl) return streamData;
+
+  const isHls = streamData.streamUrl.endsWith('.m3u8') ||
+    streamData.streamUrl.includes('m3u8') ||
+    streamData.streamUrl.includes('/hls/');
+
+  if (isHls && (!streamData.audioTracks || !streamData.subtitleTracks)) {
+    const hlsDetails = await parseMasterM3u8(streamData.streamUrl, streamData.headers);
+    if (hlsDetails) {
+      streamData.audioTracks = hlsDetails.audioTracks;
+      streamData.subtitleTracks = hlsDetails.subtitleTracks;
+      if (hlsDetails.qualities && hlsDetails.qualities.length > 0) {
+        if (!streamData.qualities || streamData.qualities.length === 0) {
+          streamData.qualities = hlsDetails.qualities.map(q => ({
+            quality: `${q}p`,
+            url: streamData.streamUrl,
+            headers: streamData.headers
+          }));
+        }
+      }
+    }
+  }
+  return streamData;
+}
+
+async function fetchTmdbMetadata(id, type) {
+  const { baseUrl, apiKey } = config.tmdb;
+  const pathType = type.toLowerCase() === 'tv' ? 'tv' : 'movie';
+  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos,recommendations`;
+
+  try {
+    const response = await axios.get(url, { timeout: 5000 });
+    const data = response.data;
+
+    const cast = (data.credits?.cast || []).slice(0, 10).map(c => ({
+      name: c.name,
+      character: c.character,
+      profilePath: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null
+    }));
+
+    const genres = (data.genres || []).map(g => g.name);
+    const genreStr = genres.join(', ');
+
+    // Parse director from crew
+    const crew = data.credits?.crew || [];
+    const directorObj = crew.find(c => c.job === 'Director');
+    const director = directorObj ? directorObj.name : '';
+
+    // Find YouTube Trailer key
+    const trailerKey = (data.videos?.results || []).find(
+      v => v.type === 'Trailer' && v.site === 'YouTube'
+    )?.key || null;
+    const trailer = trailerKey ? `https://www.youtube.com/watch?v=${trailerKey}` : null;
+
+    const seasons = (data.seasons || []).map(s => ({
+      seasonNumber: s.season_number,
+      season_number: s.season_number,
+      episodeCount: s.episode_count,
+      episode_count: s.episode_count,
+      name: s.name || `Season ${s.season_number}`
+    })).filter(s => s.season_number > 0);
+
+    const recommendations = (data.recommendations?.results || []).slice(0, 10).map(r => ({
+      id: r.id,
+      title: r.title || r.name || 'Unknown',
+      posterPath: r.poster_path ? `https://image.tmdb.org/t/p/w185${r.poster_path}` : null,
+      mediaType: r.media_type || (r.first_air_date ? 'tv' : 'movie')
+    }));
+
+    return {
+      overview: data.overview || '',
+      genres,
+      genre: genreStr,
+      cast,
+      director,
+      trailer,
+      seasons,
+      recommendations,
+      backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
+      poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      rating: data.vote_average ? `TMDB ${data.vote_average.toFixed(1)}` : null,
+      duration: data.runtime || (data.episode_run_time && data.episode_run_time.length > 0 ? data.episode_run_time[0] : null)
+    };
+  } catch (err) {
+    logger.warn(`Failed to fetch TMDB details for enrichment: ${err.message}`);
+    return null;
+  }
+}
+
+async function enrichWithTmdb(data, type) {
+  if (!data) return data;
+  const tmdbId = data.tmdbId || data.id;
+  if (!tmdbId) return data;
+
+  try {
+    const tmdbData = await fetchTmdbMetadata(tmdbId, type);
+    if (!tmdbData) return data;
+
+    return {
+      ...data,
+      cast: tmdbData.cast || [],
+      director: tmdbData.director || '',
+      trailer: tmdbData.trailer || null,
+      recommendations: tmdbData.recommendations || [],
+      seasons: tmdbData.seasons || [],
+      genres: tmdbData.genres || data.genres || [],
+      genre: tmdbData.genre || data.genre || '',
+      overview: tmdbData.overview || data.overview || '',
+      description: tmdbData.overview || data.overview || '',
+      backdrop: tmdbData.backdrop || data.backdrop || '',
+      poster: tmdbData.poster || data.poster || '',
+      rating: tmdbData.rating || data.rating || 'TMDB 0.0',
+      duration: tmdbData.duration || data.duration || null
+    };
+  } catch (err) {
+    logger.warn(`Enrichment failed: ${err.message}`);
+    return data;
+  }
+}
+
 class ProviderManager {
   constructor() {
     // Initialize Registry and discover providers
@@ -145,8 +356,9 @@ class ProviderManager {
         logger.info(`Fetching details for TMDB ${id} (${type}) from primary provider: ${targetProvider.displayName}`);
         const data = await targetProvider.details(id, type);
         if (data) {
-          cache.set(cacheKey, data);
-          return data;
+          const enriched = await enrichWithTmdb(data, type);
+          cache.set(cacheKey, enriched);
+          return enriched;
         }
       } catch (err) {
         logger.warn(`Primary provider details fetch failed for ${providerName}: ${err.message}. Triggering failover...`);
@@ -162,8 +374,9 @@ class ProviderManager {
         const data = await provider.details(id, type);
         if (data) {
           logger.info(`Failover SUCCESSFUL: Retrieved details from ${provider.displayName}`);
-          cache.set(cacheKey, data);
-          return data;
+          const enriched = await enrichWithTmdb(data, type);
+          cache.set(cacheKey, enriched);
+          return enriched;
         }
       } catch (err) {
         logger.debug(`Failover provider ${provider.displayName} details query failed: ${err.message}`);
@@ -233,6 +446,8 @@ class ProviderManager {
       throw new Error(`No provider could fetch details for ${type} ID ${tmdbId}`);
     }
 
+    metadata = await enrichWithTmdb(metadata, type);
+
     // ── Phase 2: Stream Availability — SEQUENTIAL, priority order ───────────
     //
     // ARCHITECTURE RULE: This phase must NEVER run providers in parallel.
@@ -257,10 +472,11 @@ class ProviderManager {
 
       if (cachedStream) {
         // ── Cache hit — no network call needed ──────────────────────────────
+        const enrichedStream = await parseAndEnrichHls(cachedStream);
         const isPlayable = !!(
-          cachedStream.streamUrl ||
-          (cachedStream.qualities && cachedStream.qualities.length > 0) ||
-          (cachedStream.streamType === 'embed' && cachedStream.embedUrl)
+          enrichedStream.streamUrl ||
+          (enrichedStream.qualities && enrichedStream.qualities.length > 0) ||
+          (enrichedStream.streamType === 'embed' && enrichedStream.embedUrl)
         );
         logger.debug(`[DetailsP] ${provider.displayName} stream availability: CACHED (${isPlayable ? 'available' : 'unavailable'})`);
         sourceChecks.push({
@@ -269,10 +485,13 @@ class ProviderManager {
           serverIndex: idx + 1,
           available: isPlayable,
           downloadSupported: provider.downloadSupported || false,
-          streamType: cachedStream.streamType || null,
-          embedUrl: cachedStream.embedUrl || null,
-          variants: cachedStream.variants || [],
-          languages: cachedStream.variants?.map(v => v.language) || ['Original Audio'],
+          streamType: enrichedStream.streamType || null,
+          embedUrl: enrichedStream.embedUrl || null,
+          variants: enrichedStream.variants || [],
+          languages: enrichedStream.variants?.map(v => v.language) || ['Original Audio'],
+          audioTracks: enrichedStream.audioTracks || [],
+          subtitleTracks: enrichedStream.subtitleTracks || [],
+          qualities: enrichedStream.qualities || []
         });
       } else {
         // ── No cache — live availability check (stream() with strict timeout) ─
@@ -280,14 +499,14 @@ class ProviderManager {
         // lightweight ping API. The result is cached so subsequent calls
         // (e.g. Watch Now) are served from cache.
         try {
-          const streamData = await Promise.race([
+          let streamData = await Promise.race([
             provider.stream(tmdbId, type, 1, 1, null, null),
             new Promise((_, reject) =>
               setTimeout(() => reject(new Error('Availability check timeout')), 12000)
             )
           ]);
 
-          const isPlayable = !!(
+          let isPlayable = !!(
             streamData &&
             (
               streamData.streamUrl ||
@@ -295,6 +514,10 @@ class ProviderManager {
               (streamData.streamType === 'embed' && streamData.embedUrl)
             )
           );
+
+          if (isPlayable) {
+            streamData = await parseAndEnrichHls(streamData);
+          }
 
           // Cache the live result so Watch Now can serve it immediately
           if (isPlayable) {
@@ -317,6 +540,9 @@ class ProviderManager {
             embedUrl: streamData?.embedUrl || null,
             variants: streamData?.variants || [],
             languages: streamData?.variants?.map(v => v.language) || ['Original Audio'],
+            audioTracks: streamData?.audioTracks || [],
+            subtitleTracks: streamData?.subtitleTracks || [],
+            qualities: streamData?.qualities || []
           });
         } catch (err) {
           logger.debug(`[DetailsP] ${provider.displayName} stream availability: OFFLINE — ${err.message}`);
@@ -330,6 +556,9 @@ class ProviderManager {
             embedUrl: null,
             variants: [],
             languages: ['Original Audio'],
+            audioTracks: [],
+            subtitleTracks: [],
+            qualities: []
           });
         }
       }
@@ -339,30 +568,49 @@ class ProviderManager {
     // If a provider has language variants, expand to one entry per variant.
     // Frontend renders this exactly as received — never sorts or filters.
     const sources = [];
+    const supportedAudio = new Set();
+    const supportedSubtitles = new Set();
+    const supportedQualities = new Set();
+    let downloadAvailable = false;
+
     for (const check of sourceChecks) {
-      if (check.available && check.variants && check.variants.length > 0) {
-        for (const variant of check.variants) {
-          sources.push({
-            provider: check.provider,
-            id: variant.id,
-            serverIndex: check.serverIndex,
-            available: true,
-            downloadSupported: check.downloadSupported || false,
-            languages: [variant.language],
-            streamType: check.streamType || null,
+      sources.push({
+        provider: check.provider,
+        id: String(tmdbId),
+        serverIndex: check.serverIndex,
+        available: check.available,
+        downloadSupported: check.downloadSupported || false,
+        languages: check.languages,
+        streamType: check.streamType || null,
+        embedUrl: check.embedUrl || null,
+        variants: check.variants || []
+      });
+
+      if (check.available) {
+        if (check.audioTracks && check.audioTracks.length > 0) {
+          check.audioTracks.forEach(t => supportedAudio.add(t.name || t.id));
+        } else if (check.languages) {
+          check.languages.forEach(l => supportedAudio.add(l));
+        }
+
+        if (check.subtitleTracks && check.subtitleTracks.length > 0) {
+          check.subtitleTracks.forEach(t => supportedSubtitles.add(t.name || t.id));
+        }
+
+        if (check.qualities && check.qualities.length > 0) {
+          check.qualities.forEach(q => {
+            const cleanQ = String(q.quality).replace('p', '');
+            if (cleanQ && !isNaN(cleanQ)) {
+              supportedQualities.add(parseInt(cleanQ, 10));
+            } else {
+              supportedQualities.add(q.quality);
+            }
           });
         }
-      } else {
-        sources.push({
-          provider: check.provider,
-          id: String(tmdbId),
-          serverIndex: check.serverIndex,
-          available: check.available,
-          downloadSupported: check.downloadSupported || false,
-          languages: check.languages,
-          streamType: check.streamType || null,
-          embedUrl: check.embedUrl || null,
-        });
+
+        if (check.downloadSupported) {
+          downloadAvailable = true;
+        }
       }
     }
 
@@ -378,6 +626,17 @@ class ProviderManager {
       ...metadata,
       sources,
       defaultProvider,
+      supportedAudio: Array.from(supportedAudio),
+      supportedSubtitles: Array.from(supportedSubtitles),
+      supportedQualities: Array.from(supportedQualities)
+        .sort((a, b) => {
+          const numA = parseInt(a, 10);
+          const numB = parseInt(b, 10);
+          if (!isNaN(numA) && !isNaN(numB)) return numB - numA;
+          return String(b).localeCompare(String(a));
+        })
+        .map(q => typeof q === 'number' ? `${q}p` : q),
+      downloadAvailable
     };
 
     // Cache for 30 minutes (availability may change)
@@ -426,9 +685,10 @@ class ProviderManager {
     }
 
     logger.info(`[Stream:explicit] Fetching stream for TMDB ${id} (${type}) from provider: ${targetProvider.displayName}`);
-    const data = await targetProvider.stream(id, type, season, episode, variantId, clientIp);
+    let data = await targetProvider.stream(id, type, season, episode, variantId, clientIp);
 
     if (data && (data.streamUrl || data.qualities?.length > 0 || data.embedUrl)) {
+      data = await parseAndEnrichHls(data);
       let ttl = 1800;
       if (data.expires) {
         const nowSec = Math.floor(Date.now() / 1000);
@@ -525,6 +785,7 @@ class ProviderManager {
         );
 
         if (isPlayable) {
+          streamData = await parseAndEnrichHls(streamData);
           entry.result = 'success';
           pipelineLog.push(entry);
 

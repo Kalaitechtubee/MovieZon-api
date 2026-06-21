@@ -16,20 +16,20 @@ async function fetchTmdbDetails(id, type) {
   try {
     const response = await axios.get(url, { timeout: 5000 });
     const data = response.data;
-    
+
     // Normalize response to standard format
     const title = data.title || data.name || 'Unknown Title';
     const originalTitle = data.original_title || data.original_name || title;
     const releaseDate = data.release_date || data.first_air_date || '';
     const year = releaseDate ? new Date(releaseDate).getFullYear() : null;
     const runtime = data.runtime || (data.episode_run_time && data.episode_run_time.length > 0 ? data.episode_run_time[0] : null);
-    
+
     const cast = (data.credits?.cast || []).slice(0, 10).map(c => ({
       name: c.name,
       character: c.character,
       profilePath: c.profile_path ? `https://image.tmdb.org/t/p/w185${c.profile_path}` : null
     }));
-    
+
     const genres = (data.genres || []).map(g => g.name);
     const genreStr = genres.join(', ');
 
@@ -37,7 +37,7 @@ async function fetchTmdbDetails(id, type) {
     const crew = data.credits?.crew || [];
     const directorObj = crew.find(c => c.job === 'Director');
     const director = directorObj ? directorObj.name : '';
-    
+
     // Find YouTube Trailer key
     const trailerKey = (data.videos?.results || []).find(
       v => v.type === 'Trailer' && v.site === 'YouTube'
@@ -102,7 +102,7 @@ async function searchTmdb(query) {
   try {
     const response = await axios.get(url, { timeout: 5000 });
     const results = response.data.results || [];
-    
+
     return results
       .filter(item => ['movie', 'tv'].includes(item.media_type))
       .map(item => {
@@ -147,7 +147,7 @@ const apiController = {
 
       // 1. Try TMDB search first
       let items = await searchTmdb(q.trim());
-      
+
       // 2. If TMDB search failed or returned 0 results, fall back to local provider catalog database
       if (items.length === 0) {
         logger.info(`TMDB search returned 0 items. Querying local providers index...`);
@@ -188,7 +188,7 @@ const apiController = {
       } catch (err) {
         logger.warn(`Could not retrieve details for provider ${provider} ID ${id}: ${err.message}`);
       }
-      
+
       if (details) {
         details.id = details.id || String(details.tmdbId || id);
         details.provider = details.provider || provider;
@@ -197,7 +197,7 @@ const apiController = {
         details.overview = details.overview || details.description || '';
         details.genre = details.genre || (Array.isArray(details.genres) ? details.genres.join(', ') : '');
         details.genres = details.genres || (details.genre ? details.genre.split(',').map(g => g.trim()) : []);
-        
+
         if (details.rating && typeof details.rating === 'number') {
           details.rating = `TMDB ${details.rating.toFixed(1)}`;
         }
@@ -445,8 +445,8 @@ const apiController = {
           embedUrl: streamInfo.embedUrl,
           embedFallbacks: streamInfo.embedFallbacks || [],
           streams: [],
-          subtitles: [],
           variants: streamInfo.variants || [],
+          selectedVariantId: streamInfo.selectedVariantId || null,
           stream: streamInfo
         });
       }
@@ -459,6 +459,7 @@ const apiController = {
         streams: streamInfo.qualities || [],
         subtitles: streamInfo.subtitles || [],
         variants: streamInfo.variants || [],
+        selectedVariantId: streamInfo.selectedVariantId || null,
         stream: streamInfo
       });
     } catch (err) {
@@ -501,7 +502,7 @@ const apiController = {
     const uptime = process.uptime();
     const memory = process.memoryUsage();
     const providersHealth = healthService.getAllHealth();
-    
+
     // Check if any provider is unhealthy
     const isDegraded = Object.values(providersHealth).some(h => h.status === 'unhealthy');
 
@@ -526,9 +527,9 @@ const apiController = {
     try {
       const { category } = req.params;
       const { baseUrl, apiKey } = config.tmdb;
-      
+
       let url = '';
-      
+
       if (category === 'trending') {
         const media = req.query.media || 'all';
         const time = req.query.time || 'week';
@@ -561,16 +562,16 @@ const apiController = {
       });
 
       logger.debug(`Proxying TMDB list query for category "${category}" to: ${urlObj.toString()}`);
-      
+
       const response = await axios.get(urlObj.toString(), { timeout: 5000 });
       const results = response.data.results || [];
-      
+
       // Normalize results using provider-normalizer
       const { normalizeCatalogItem } = require('../provider-normalizer');
       const normalizedResults = results.map(item => {
         const isTvShow = category === 'popular_tv' || req.query.type === 'tv' || item.media_type === 'tv' || (!item.title && item.name);
         const mediaType = isTvShow ? 'tv' : 'movie';
-        
+
         return normalizeCatalogItem({
           tmdbId: item.id,
           id: String(item.id),
@@ -610,17 +611,17 @@ const apiController = {
       const { tmdbId, seasonNumber } = req.params;
       const { provider } = req.query;
       const { baseUrl, apiKey } = config.tmdb;
-      
+
       const url = `${baseUrl}/tv/${tmdbId}/season/${seasonNumber}?api_key=${apiKey}&language=en-US`;
       logger.debug(`Fetching TV season episodes from TMDB: ${url}`);
-      
+
       const response = await axios.get(url, { timeout: 5000 });
       const episodes = response.data.episodes || [];
-      
+
       const normalizedEpisodes = episodes.map(item => {
         const compositeId = `${tmdbId}-${seasonNumber}-${item.episode_number}`;
         const stillUrl = item.still_path ? `https://image.tmdb.org/t/p/w300${item.still_path}` : null;
-        
+
         return {
           id: compositeId,
           provider: provider || 'netmirror',
@@ -658,7 +659,7 @@ const apiController = {
  * The backend decides which provider to use — the frontend never chooses.
  * Provider order: always follows config.providerPriority (NetMirror first, Peachify second, etc.)
  */
-apiController.resolveStream = async function(req, res, next) {
+apiController.resolveStream = async function (req, res, next) {
   try {
     const { tmdbId } = req.params;
     const { type, season, episode, variant } = req.query;
@@ -752,8 +753,8 @@ apiController.resolveStream = async function(req, res, next) {
         embedUrl: streamResult.embedUrl,
         embedFallbacks: streamResult.embedFallbacks || [],
         streams: [],
-        subtitles: [],
         variants: streamResult.variants || [],
+        selectedVariantId: streamResult.selectedVariantId || null,
         stream: streamResult
       });
     }
@@ -771,6 +772,7 @@ apiController.resolveStream = async function(req, res, next) {
       streams: streamResult.qualities || [],
       subtitles: streamResult.subtitles || [],
       variants: streamResult.variants || [],
+      selectedVariantId: streamResult.selectedVariantId || null,
       stream: streamResult
     });
   } catch (err) {
@@ -784,7 +786,7 @@ apiController.resolveStream = async function(req, res, next) {
  * Implements chunked 206 Partial Content queries for scrub/seeking.
  * GET /api/proxy-stream?url=https://stream-cdn.com/...
  */
-apiController.proxyStream = async function(req, res, next) {
+apiController.proxyStream = async function (req, res, next) {
   try {
     const { url, headers: queryHeaders } = req.query;
     if (!url) {
@@ -830,10 +832,10 @@ apiController.proxyStream = async function(req, res, next) {
         targetHost = hostMatch[1];
       }
     }
-    const isSubtitle = targetUrl.toLowerCase().includes('.srt') || 
-                       targetUrl.toLowerCase().includes('.vtt') ||
-                       targetUrl.includes('/msubt/') ||
-                       targetUrl.includes('/subtitle/');
+    const isSubtitle = targetUrl.toLowerCase().includes('.srt') ||
+      targetUrl.toLowerCase().includes('.vtt') ||
+      targetUrl.includes('/msubt/') ||
+      targetUrl.includes('/subtitle/');
     if (!isDownload && !isSubtitle && targetHost.endsWith('hakunaymatata.com') && !targetHost.includes('streamhub-proxy') && !targetHost.includes('workers.dev')) {
       targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(targetUrl)}`;
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
@@ -885,10 +887,10 @@ apiController.proxyStream = async function(req, res, next) {
     }
 
     // Detect HLS/m3u8 playlists and rewrite segment URLs to route through the backend proxy
-    const isM3u8Url = targetUrl.split('?')[0].endsWith('.m3u8') || 
-                      targetUrl.includes('hls-proxy') || 
-                      targetUrl.includes('m3u8') || 
-                      targetUrl.includes('/hls/');
+    const isM3u8Url = targetUrl.split('?')[0].endsWith('.m3u8') ||
+      targetUrl.includes('hls-proxy') ||
+      targetUrl.includes('m3u8') ||
+      targetUrl.includes('/hls/');
     if (isM3u8Url) {
       logger.info(`[ProxyStream] Detected HLS playlist. Fetching and rewriting URLs for: ${targetUrl}`);
       try {
@@ -912,8 +914,23 @@ apiController.proxyStream = async function(req, res, next) {
         const lines = response.data.split(/\r?\n/);
         const rewrittenLines = lines.map(line => {
           const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) {
+          if (!trimmed) {
             return line;
+          }
+          if (trimmed.startsWith('#')) {
+            // Rewrite URI attributes in #EXT-X-MEDIA, #EXT-X-KEY, etc.
+            return line.replace(/URI="([^"]+)"/g, (match, p1) => {
+              try {
+                const absoluteUrl = new URL(p1, targetUrl).toString();
+                let rewrittenUrl = `${proxyBase}?url=${encodeURIComponent(absoluteUrl)}`;
+                if (queryHeaders) {
+                  rewrittenUrl += `&headers=${queryHeaders}`;
+                }
+                return `URI="${rewrittenUrl}"`;
+              } catch (e) {
+                return match;
+              }
+            });
           }
           try {
             const absoluteUrl = new URL(trimmed, targetUrl).toString();
@@ -989,7 +1006,7 @@ apiController.proxyStream = async function(req, res, next) {
  * DetailPage / PlayerPage / any frontend code must call this endpoint,
  * not getStreamV2(provider, id) with a frontend-chosen provider.
  */
-apiController.resolveDownload = async function(req, res, next) {
+apiController.resolveDownload = async function (req, res, next) {
   try {
     const { tmdbId } = req.params;
     const { type, season, episode, variant } = req.query;

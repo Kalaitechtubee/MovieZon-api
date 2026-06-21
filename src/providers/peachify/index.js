@@ -198,125 +198,7 @@ class PeachifyProvider extends BaseProvider {
       embedUrl = `${PEACHIFY_BASE}/embed/movie/${resolvedId}`;
     }
 
-    // Try to scrape direct streams
-    const ee = [
-      {label:"Iron",path:"moviebox",apis:["https://uwu.eat-peach.sbs"]},
-      {label:"Spider",path:"holly",apis:["https://usa.eat-peach.sbs"]},
-      {label:"Wolf",path:"air",apis:["https://usa.eat-peach.sbs"]},
-      {label:"Multi",path:"multi",apis:["https://usa.eat-peach.sbs"]},
-      {label:"Dark",path:"net",apis:["https://uwu.eat-peach.sbs"]}
-    ];
-
-    let decryptedData = null;
-
-    for (const item of ee) {
-      for (const api of item.apis) {
-        let url;
-        if (mediaType === 'tv') {
-          url = `${api}/${item.path}/tv/${resolvedId}/${season}/${episode}`;
-        } else {
-          url = `${api}/${item.path}/movie/${resolvedId}`;
-        }
-        logger.debug(`[Peachify] Trying to fetch stream from API: ${url}`);
-        try {
-          const res = await this.peachifyGet(url, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'application/json, text/plain, */*',
-              'Accept-Language': 'en-US,en;q=0.9',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Referer': 'https://peachify.top/',
-              'Origin': 'https://peachify.top',
-              'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-              'Sec-Ch-Ua-Mobile': '?0',
-              'Sec-Ch-Ua-Platform': '"Windows"',
-              'Sec-Fetch-Dest': 'empty',
-              'Sec-Fetch-Mode': 'cors',
-              'Sec-Fetch-Site': 'cross-site'
-            },
-            timeout: 4000
-          });
-
-          if (res.data && res.data.isEncrypted && res.data.data) {
-            logger.info(`[Peachify] Decrypting response from ${item.label} (${url})`);
-            const decrypted = await dD(res.data.data, keyHex);
-            if (decrypted && decrypted.sources && decrypted.sources.length > 0) {
-              decryptedData = decrypted;
-              break;
-            }
-          }
-        } catch (err) {
-          logger.debug(`[Peachify] Fetch/Decrypt failed for ${item.label} (${url}): ${err.message}`);
-        }
-      }
-      if (decryptedData) break;
-    }
-
-    if (decryptedData) {
-      logger.info(`[Peachify] Successfully resolved direct native streams!`);
-
-      // Normalize qualities
-      const qualities = decryptedData.sources.map(s => {
-        let qStr = '1080p';
-        if (s.quality) {
-          qStr = String(s.quality).endsWith('p') ? String(s.quality) : `${s.quality}p`;
-        } else if (s.type === 'm3u8') {
-          qStr = 'HLS';
-        }
-        return {
-          quality: qStr,
-          url: s.url || '',
-          headers: s.headers || {}
-        };
-      });
-
-      // Normalize subtitles
-      const subtitles = (decryptedData.subtitles || []).map(sub => ({
-        lang: sub.langCode || 'en',
-        name: sub.label || 'English',
-        url: sub.url || ''
-      }));
-
-      // Find best default streamUrl (prefer HLS/m3u8, then first quality)
-      const hlsStream = decryptedData.sources.find(s => s.type === 'm3u8');
-      const firstStream = decryptedData.sources[0];
-      const streamUrl = hlsStream ? hlsStream.url : (firstStream ? firstStream.url : '');
-      const streamHeaders = hlsStream ? hlsStream.headers : (firstStream ? firstStream.headers : {});
-
-      // Parse expiration timestamp from the stream URL if present
-      let expires = null;
-      if (streamUrl) {
-        try {
-          let urlToParse = streamUrl;
-          if (streamUrl.includes('url=')) {
-            const match = streamUrl.match(/url=([^&]+)/);
-            if (match) {
-              urlToParse = decodeURIComponent(match[1]);
-            }
-          }
-          const urlObj = new URL(urlToParse);
-          const t = urlObj.searchParams.get('t');
-          if (t) {
-            // 't' is the generation timestamp. The secure token is valid for 1 hour (3600 seconds).
-            expires = parseInt(t, 10) + 3600;
-          }
-        } catch (e) {
-          logger.debug(`[Peachify] Failed to parse expires from stream URL: ${e.message}`);
-        }
-      }
-
-      return normalizeStream({
-        drm: false,
-        streamUrl,
-        qualities,
-        subtitles,
-        expires,
-        headers: streamHeaders
-      }, 'peachify');
-    }
-
-    // Fallback if scraping/decryption failed
-    // Prioritize Peachify's own embed player, using public ones as alternative fallbacks
+    // Return Peachify embed player stream directly as Peachify is embed-only
     const fallbackEmbeds = [embedUrl];
     if (mediaType === 'tv') {
       fallbackEmbeds.push(
@@ -333,7 +215,7 @@ class PeachifyProvider extends BaseProvider {
     }
 
     const primaryFallbackEmbed = fallbackEmbeds[0];
-    logger.warn(`[Peachify] No direct stream resolved. Returning Peachify embed fallback: ${primaryFallbackEmbed}`);
+    logger.info(`[Peachify] Returning Peachify embed player stream: ${primaryFallbackEmbed}`);
 
     return {
       provider: 'peachify',

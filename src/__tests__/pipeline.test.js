@@ -1073,4 +1073,77 @@ describe('Stream Caching & Pipeline Caching with Variants', () => {
   });
 });
 
+describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
+  let originalExports;
+  let axiosPath;
+  let mockAxiosHandler = null;
+
+  beforeEach(() => {
+    axiosPath = require.resolve('axios');
+    originalExports = require.cache[axiosPath].exports;
+
+    const mockedAxios = function(...args) {
+      if (mockAxiosHandler) {
+        return mockAxiosHandler(...args);
+      }
+      return originalExports(...args);
+    };
+    Object.assign(mockedAxios, originalExports);
+    require.cache[axiosPath].exports = mockedAxios;
+  });
+
+  afterEach(() => {
+    if (axiosPath && originalExports) {
+      require.cache[axiosPath].exports = originalExports;
+    }
+    mockAxiosHandler = null;
+  });
+
+  test('TC-HLS01: Should rewrite absolute and relative URIs inside HLS comments (#EXT-X-MEDIA) and segment URLs', async () => {
+    // Force reload apiController so it binds to our mocked axios
+    delete require.cache[require.resolve('../controllers/apiController')];
+    const apiController = require('../controllers/apiController');
+
+    const mockM3u8Content = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="tam",NAME="Tamil",DEFAULT=YES,URI="/net/m3u8/fcdb9bb9.m3u8?src=https%3A%2F%2Fs22.nm-cdn11.top%2F1.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000001,RESOLUTION=1920x1080
+/net/m3u8/fcdb9bb9.m3u8?src=https%3A%2F%2Fs22.nm-cdn11.top%2F1.m3u8`;
+
+    mockAxiosHandler = async (config) => {
+      return {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+        data: mockM3u8Content
+      };
+    };
+
+    const req = {
+      query: { url: 'https://uwu.eat-peach.sbs/net/m3u8/6a8520b1.m3u8' },
+      headers: {},
+      get: (headerName) => {
+        if (headerName.toLowerCase() === 'host') return 'localhost:3000';
+        return '';
+      },
+      on: (event, cb) => {}
+    };
+
+    let responseBody = '';
+    let responseStatus = 0;
+    let responseHeaders = {};
+    const res = {
+      status: (code) => { responseStatus = code; return res; },
+      setHeader: (name, val) => { responseHeaders[name] = val; return res; },
+      send: (body) => { responseBody = body; }
+    };
+
+    await apiController.proxyStream(req, res);
+
+    assert.equal(responseStatus, 200);
+    // Verify that both the URI inside #EXT-X-MEDIA and the segment URL were rewritten to route through proxy
+    assert.ok(responseBody.includes('URI="http://localhost:3000/api/v2/stream/proxy?url=https%3A%2F%2Fuwu.eat-peach.sbs%2Fnet%2Fm3u8%2Ffcdb9bb9.m3u8%3Fsrc%3Dhttps%253A%252F%252Fs22.nm-cdn11.top%252F1.m3u8"'));
+    assert.ok(responseBody.includes('http://localhost:3000/api/v2/stream/proxy?url=https%3A%2F%2Fuwu.eat-peach.sbs%2Fnet%2Fm3u8%2Ffcdb9bb9.m3u8%3Fsrc%3Dhttps%253A%252F%252Fs22.nm-cdn11.top%252F1.m3u8'));
+  });
+});
+
 console.log('\n✅ All MovieZon provider pipeline tests defined. Run with: node --test src/__tests__/pipeline.test.js\n');
