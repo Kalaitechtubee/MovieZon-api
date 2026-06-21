@@ -12,6 +12,7 @@ const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d
 
 const { URL } = require('url');
 let proxyConfig = null;
+let proxyDisabledUntil = 0; // Timestamp to bypass broken proxy temporarily
 if (config.proxyUrl) {
   try {
     const parsedProxy = new URL(config.proxyUrl);
@@ -75,13 +76,41 @@ class PeachifyProvider extends BaseProvider {
 
   async peachifyGet(url, options = {}) {
     const reqOptions = { ...options };
-    if (proxyConfig) {
+    let usedProxy = false;
+    const now = Date.now();
+    if (proxyConfig && now > proxyDisabledUntil) {
       reqOptions.proxy = proxyConfig;
+      usedProxy = true;
     }
+    
+    let lastError = null;
     try {
       return await axios.get(url, reqOptions);
     } catch (err) {
-      logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+      lastError = err;
+      if (usedProxy) {
+        logger.warn(`[Peachify] Proxy request failed for: ${url}. Error: ${err.message}. Retrying TRULY directly (without proxy)...`);
+        
+        // If the error is proxy-specific (status 402, 407) or connection/timeout error on the proxy,
+        // temporarily bypass the proxy for subsequent requests (e.g., 5 minutes)
+        const isProxyStatusError = err.response && (err.response.status === 402 || err.response.status === 407);
+        const isProxyNetError = err.code && ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EHOSTUNREACH'].includes(err.code);
+        if (isProxyStatusError || isProxyNetError) {
+          proxyDisabledUntil = Date.now() + 5 * 60 * 1000;
+          logger.warn(`[Peachify] Proxy returned error (${err.message}). Bypassing proxy for 5 minutes.`);
+        }
+
+        try {
+          const directOptions = { ...options };
+          return await axios.get(url, { ...directOptions, proxy: false });
+        } catch (directErr) {
+          lastError = directErr;
+          logger.warn(`[Peachify] Truly direct request also failed for: ${url}. Error: ${directErr.message}. Retrying via Cloudflare Worker proxy...`);
+        }
+      } else {
+        logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+      }
+
       // Encode the required headers into the query string so the CF worker
       // forwards them to eat-peach.sbs. This allows fetching even when
       // the server's IP (e.g. Render's) is blocked by the upstream API.
@@ -98,8 +127,9 @@ class PeachifyProvider extends BaseProvider {
         logger.info(`[Peachify Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
         return res;
       } catch (proxyErr) {
-        logger.error(`[Peachify Proxy] Proxy request also failed: ${proxyErr.message}`);
-        throw err;
+        lastError = proxyErr;
+        logger.error(`[Peachify Proxy] Cloudflare Worker proxy request also failed: ${proxyErr.message}`);
+        throw lastError;
       }
     }
   }

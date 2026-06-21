@@ -18,9 +18,14 @@ router.get('/v2/details/tmdb/:id', apiController.unifiedDetails);
 router.get('/v2/details/:provider/:id', apiController.details);
 
 // Backend-controlled sequential pipeline stream (backend decides provider — frontend never chooses).
-// IMPORTANT: This route MUST be declared before /v2/stream/:provider/:id so that
+// IMPORTANT: These routes MUST be declared before their /:provider/:id counterparts so that
 // Express does not match "tmdb" as a :provider value.
 router.get('/v2/stream/tmdb/:tmdbId', apiController.resolveStream);
+
+// Backend-controlled sequential download pipeline.
+// The backend decides which provider to use — the frontend NEVER picks a provider for downloads.
+// Peachify (embed-only) is automatically skipped; NetMirror is always tried first.
+router.get('/v2/download/tmdb/:tmdbId', apiController.resolveDownload);
 
 // Explicit provider stream (for user-initiated manual server switching).
 router.get('/v2/stream/:provider/:id', apiController.stream);

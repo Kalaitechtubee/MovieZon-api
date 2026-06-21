@@ -233,77 +233,107 @@ class ProviderManager {
       throw new Error(`No provider could fetch details for ${type} ID ${tmdbId}`);
     }
 
-    // ── Phase 2: Stream Availability — parallel, ALL providers ──────────────
-    // Check each provider's stream status to populate the sources list.
-    // Uses cached stream results first (from a prior resolveStream() call).
-    // This avoids duplicate work if the user visited the player already.
-    const streamChecks = providers.map(async (provider, idx) => {
+    // ── Phase 2: Stream Availability — SEQUENTIAL, priority order ───────────
+    //
+    // ARCHITECTURE RULE: This phase must NEVER run providers in parallel.
+    //
+    // Providers are checked one-by-one in config.providerPriority order.
+    // This guarantees that `defaultProvider` is ALWAYS the highest-priority
+    // provider that has a working stream — identical to what resolveStream()
+    // would select. A parallel Promise.all would allow a lower-priority
+    // provider (e.g. Peachify) to appear available before a higher-priority
+    // one (e.g. NetMirror) has finished its check, causing defaultProvider
+    // to be set incorrectly.
+    //
+    // Cache-first: we check the stream cache before making any network call.
+    // If resolveStream() has already run for this title, the results are
+    // served instantly from cache — no duplicate provider requests.
+    const sourceChecks = [];
+
+    for (let idx = 0; idx < providers.length; idx++) {
+      const provider = providers[idx];
       const streamCacheKey = `stream:${provider.name}:${type}:${tmdbId}:1:1:default:default`;
       const cachedStream = cache.get(streamCacheKey);
+
       if (cachedStream) {
-        const isPlayable = cachedStream.streamUrl ||
+        // ── Cache hit — no network call needed ──────────────────────────────
+        const isPlayable = !!(
+          cachedStream.streamUrl ||
           (cachedStream.qualities && cachedStream.qualities.length > 0) ||
-          (cachedStream.streamType === 'embed' && cachedStream.embedUrl);
+          (cachedStream.streamType === 'embed' && cachedStream.embedUrl)
+        );
         logger.debug(`[DetailsP] ${provider.displayName} stream availability: CACHED (${isPlayable ? 'available' : 'unavailable'})`);
-        return {
+        sourceChecks.push({
           provider: provider.name,
           id: String(tmdbId),
           serverIndex: idx + 1,
-          available: !!isPlayable,
+          available: isPlayable,
+          downloadSupported: provider.downloadSupported || false,
           streamType: cachedStream.streamType || null,
           embedUrl: cachedStream.embedUrl || null,
           variants: cachedStream.variants || [],
           languages: cachedStream.variants?.map(v => v.language) || ['Original Audio'],
-        };
-      }
+        });
+      } else {
+        // ── No cache — live availability check (stream() with strict timeout) ─
+        // We call stream() here because providers do not have a separate
+        // lightweight ping API. The result is cached so subsequent calls
+        // (e.g. Watch Now) are served from cache.
+        try {
+          const streamData = await Promise.race([
+            provider.stream(tmdbId, type, 1, 1, null, null),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Availability check timeout')), 12000)
+            )
+          ]);
 
-      // No cache — do a live check (with timeout so it doesn't stall)
-      try {
-        const streamData = await Promise.race([
-          provider.stream(tmdbId, type, 1, 1, null, null),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Availability check timeout')), 7000))
-        ]);
-        const isPlayable = streamData && (
-          streamData.streamUrl ||
-          (streamData.qualities && streamData.qualities.length > 0) ||
-          (streamData.streamType === 'embed' && streamData.embedUrl)
-        );
-        // Cache the successful stream check result
-        if (isPlayable) {
-          let ttl = 1800;
-          if (streamData.expires) {
-            const nowSec = Math.floor(Date.now() / 1000);
-            ttl = Math.max(0, streamData.expires - nowSec - 60);
+          const isPlayable = !!(
+            streamData &&
+            (
+              streamData.streamUrl ||
+              (streamData.qualities && streamData.qualities.length > 0) ||
+              (streamData.streamType === 'embed' && streamData.embedUrl)
+            )
+          );
+
+          // Cache the live result so Watch Now can serve it immediately
+          if (isPlayable) {
+            let ttl = 1800;
+            if (streamData.expires) {
+              const nowSec = Math.floor(Date.now() / 1000);
+              ttl = Math.max(0, streamData.expires - nowSec - 60);
+            }
+            if (ttl > 0) cache.set(streamCacheKey, streamData, ttl);
           }
-          if (ttl > 0) cache.set(streamCacheKey, streamData, ttl);
-        }
-        logger.debug(`[DetailsP] ${provider.displayName} stream availability: ${isPlayable ? 'AVAILABLE' : 'UNAVAILABLE'}`);
-        return {
-          provider: provider.name,
-          id: String(tmdbId),
-          serverIndex: idx + 1,
-          available: !!isPlayable,
-          streamType: streamData?.streamType || null,
-          embedUrl: streamData?.embedUrl || null,
-          variants: streamData?.variants || [],
-          languages: streamData?.variants?.map(v => v.language) || ['Original Audio'],
-        };
-      } catch (err) {
-        logger.debug(`[DetailsP] ${provider.displayName} stream availability: OFFLINE — ${err.message}`);
-        return {
-          provider: provider.name,
-          id: String(tmdbId),
-          serverIndex: idx + 1,
-          available: false,
-          streamType: null,
-          embedUrl: null,
-          variants: [],
-          languages: ['Original Audio'],
-        };
-      }
-    });
 
-    const sourceChecks = await Promise.all(streamChecks);
+          logger.debug(`[DetailsP] ${provider.displayName} stream availability: ${isPlayable ? 'AVAILABLE' : 'UNAVAILABLE'}`);
+          sourceChecks.push({
+            provider: provider.name,
+            id: String(tmdbId),
+            serverIndex: idx + 1,
+            available: isPlayable,
+            downloadSupported: provider.downloadSupported || false,
+            streamType: streamData?.streamType || null,
+            embedUrl: streamData?.embedUrl || null,
+            variants: streamData?.variants || [],
+            languages: streamData?.variants?.map(v => v.language) || ['Original Audio'],
+          });
+        } catch (err) {
+          logger.debug(`[DetailsP] ${provider.displayName} stream availability: OFFLINE — ${err.message}`);
+          sourceChecks.push({
+            provider: provider.name,
+            id: String(tmdbId),
+            serverIndex: idx + 1,
+            available: false,
+            downloadSupported: provider.downloadSupported || false,
+            streamType: null,
+            embedUrl: null,
+            variants: [],
+            languages: ['Original Audio'],
+          });
+        }
+      }
+    }
 
     // Build the final sources array — ALL providers in priority order.
     // If a provider has language variants, expand to one entry per variant.
@@ -317,6 +347,7 @@ class ProviderManager {
             id: variant.id,
             serverIndex: check.serverIndex,
             available: true,
+            downloadSupported: check.downloadSupported || false,
             languages: [variant.language],
             streamType: check.streamType || null,
           });
@@ -327,6 +358,7 @@ class ProviderManager {
           id: String(tmdbId),
           serverIndex: check.serverIndex,
           available: check.available,
+          downloadSupported: check.downloadSupported || false,
           languages: check.languages,
           streamType: check.streamType || null,
           embedUrl: check.embedUrl || null,
@@ -335,12 +367,12 @@ class ProviderManager {
     }
 
     // defaultProvider = first provider with a working stream (priority order).
-    // This is IDENTICAL to what resolveStream() would select.
-    // Both pipelines consult the same config.providerPriority — they cannot disagree.
+    // Because Phase 2 is sequential, this is ALWAYS the highest-priority
+    // provider — identical to what resolveStream() would select.
     const defaultProviderEntry = sourceChecks.find(s => s.available);
     const defaultProvider = defaultProviderEntry?.provider || metadataProvider;
 
-    logger.info(`[DetailsP] Sources for TMDB ${tmdbId}: ${sources.map(s => `${s.provider}(${s.available ? '✓' : '✗'})`).join(' → ')} | defaultProvider: ${defaultProvider}`);
+    logger.info(`[DetailsP] Sources for TMDB ${tmdbId}: ${sourceChecks.map(s => `${s.provider}(${s.available ? '✓' : '✗'})`).join(' → ')} | defaultProvider: ${defaultProvider}`);
 
     const result = {
       ...metadata,
@@ -432,16 +464,16 @@ class ProviderManager {
    * @param {string|null} clientIp
    * @returns {Promise<Object>} - Normalized stream data or { available: false }
    */
-  async resolveStream(tmdbId, type, season = 1, episode = 1, clientIp = null) {
+  async resolveStream(tmdbId, type, season = 1, episode = 1, clientIp = null, variantId = null) {
     // ── Pipeline-level result cache ────────────────────────────────────────────
     // Cache the final resolved result so repeated calls (frontend retries, HMR
     // reloads, React StrictMode double-invocations) don't re-run the pipeline.
-    // Cache key is keyed by content identity only — clientIp is excluded because
-    // all stream URLs are already proxied through this server.
-    const pipelineCacheKey = `pipeline:${type}:${tmdbId}:${season}:${episode}`;
+    // Cache key is keyed by content identity and variantId — clientIp is excluded
+    // because all stream URLs are already proxied through this server.
+    const pipelineCacheKey = `pipeline:${type}:${tmdbId}:${season}:${episode}:${variantId || 'default'}`;
     const cachedResult = cache.get(pipelineCacheKey);
     if (cachedResult) {
-      logger.info(`[Pipeline] Cache HIT for TMDB ${tmdbId} (${type} S${season}E${episode}) — returning cached result via: ${cachedResult.selectedProvider}`);
+      logger.info(`[Pipeline] Cache HIT for TMDB ${tmdbId} (${type} S${season}E${episode} var:${variantId || 'default'}) — returning cached result via: ${cachedResult.selectedProvider}`);
       return cachedResult;
     }
 
@@ -463,7 +495,27 @@ class ProviderManager {
       logger.info(`[Pipeline] → Checking provider: ${provider.displayName} for TMDB ${tmdbId}`);
 
       try {
-        const streamData = await provider.stream(tmdbId, type, season, episode, null, clientIp);
+        // Reuse cached individual provider stream if it exists (e.g. from Details availability check)
+        const streamCacheKey = `stream:${provider.name}:${type}:${tmdbId}:${season}:${episode}:${variantId || 'default'}:${clientIp || 'default'}`;
+        let streamData = cache.get(streamCacheKey);
+
+        if (streamData) {
+          if (streamData.expires) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            if (streamData.expires - nowSec < 60) {
+              logger.info(`[Pipeline] Cached stream for provider ${provider.displayName} is expiring soon. Evicting.`);
+              cache.del(streamCacheKey);
+              streamData = null;
+            }
+          }
+        }
+
+        if (streamData) {
+          logger.info(`[Pipeline] Cache HIT for provider stream: ${provider.displayName}`);
+        } else {
+          streamData = await provider.stream(tmdbId, type, season, episode, variantId, clientIp);
+        }
+
         entry.responseTimeMs = Date.now() - providerStart;
 
         const isPlayable = streamData && (
@@ -477,13 +529,16 @@ class ProviderManager {
           pipelineLog.push(entry);
 
           // Pre-cache the individual provider stream result
-          const streamCacheKey = `stream:${provider.name}:${type}:${tmdbId}:${season}:${episode}:default:${clientIp || 'default'}`;
           let ttl = 1800;
           if (streamData.expires) {
             const nowSec = Math.floor(Date.now() / 1000);
-            ttl = Math.max(0, streamData.expires - nowSec - 60);
+            ttl = Math.max(0, streamData.expires - myTtlFix(streamData.expires, nowSec));
           }
-          if (ttl > 0) cache.set(streamCacheKey, streamData, ttl);
+          function myTtlFix(exp, now) {
+            return now + 60;
+          }
+          const actualTtl = streamData.expires ? Math.max(0, streamData.expires - Math.floor(Date.now() / 1000) - 60) : 1800;
+          if (actualTtl > 0) cache.set(streamCacheKey, streamData, actualTtl);
 
           const totalMs = Date.now() - pipelineStart;
           logPipelineResult(tmdbId, type, pipelineLog, provider.name, totalMs);
@@ -498,7 +553,7 @@ class ProviderManager {
           };
 
           // Cache the final pipeline result so subsequent calls return immediately
-          if (ttl > 0) cache.set(pipelineCacheKey, resolvedResult, ttl);
+          if (actualTtl > 0) cache.set(pipelineCacheKey, resolvedResult, actualTtl);
 
           return resolvedResult;
         } else {
@@ -528,82 +583,71 @@ class ProviderManager {
     };
   }
 
-  // ─── checkAvailability (SEQUENTIAL — for details page server status) ─────────
+  // ─── resolveDownload (SEQUENTIAL DOWNLOAD PIPELINE) ──────────────────────────
 
   /**
-   * Check availability of a media ID across providers IN PRIORITY ORDER.
-   * Unlike the old parallel implementation, this runs sequentially so the
-   * `bestProvider` is always the highest-priority working provider, never a
-   * race-condition winner.
+   * Backend-controlled sequential pipeline for download stream resolution.
    *
-   * Results for ALL providers are still returned (for the frontend server status
-   * indicators), but the ordering is always preserved.
+   * Mirrors resolveStream() exactly — same provider order, same rules —
+   * but skips providers that are embed-only (no direct CDN URLs).
    *
-   * @param {string|number} id
+   * Rules:
+   *  - Always tries NetMirror first (download() not supported by Peachify).
+   *  - Peachify is embed-only: its download() throws NotSupported → skip.
+   *  - Returns the first provider that yields downloadable qualities.
+   *  - If ALL providers fail, returns { available: false }.
+   *
+   * ARCHITECTURE RULE: This is the ONLY place allowed to decide which
+   * provider handles a download request. No controller, no frontend,
+   * no utility may make this decision.
+   *
+   * @param {string|number} tmdbId
    * @param {'movie'|'tv'} type
    * @param {number} season
    * @param {number} episode
-   * @param {string|null} clientIp
+   * @param {string|null} variantId
+   * @returns {Promise<Object>} Normalized stream data or { available: false }
    */
-  async checkAvailability(id, type, season = 1, episode = 1, clientIp = null) {
+  async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
     const providers = this.getSortedProviders();
+
+    logger.info(`[DownloadP] Starting sequential download resolution for TMDB ${tmdbId} (${type} S${season}E${episode}) — ${providers.length} provider(s) in queue`);
+
     if (providers.length === 0) {
-      return { available: false, providers: [], bestProvider: null };
+      logger.warn('[DownloadP] No registered providers found.');
+      return { available: false, reason: 'No providers registered' };
     }
 
-    const results = [];
-    let bestProvider = null;
-
-    // Check providers sequentially in priority order
     for (const provider of providers) {
+      logger.info(`[DownloadP] → Checking provider: ${provider.displayName} for TMDB ${tmdbId}`);
       try {
-        logger.debug(`[AvailabilityCheck] Checking provider ${provider.displayName} for TMDB ID: ${id}`);
+        const downloadData = await provider.download(tmdbId, type, season, episode, variantId);
 
-        const streamData = await Promise.race([
-          provider.stream(id, type, season, episode, null, clientIp),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 6000))
-        ]);
-
-        const isPlayable = streamData && (
-          streamData.streamUrl ||
-          (streamData.qualities && streamData.qualities.length > 0) ||
-          (streamData.streamType === 'embed' && streamData.embedUrl)
+        const hasDirectStreams = downloadData && (
+          downloadData.streamUrl ||
+          (downloadData.qualities && downloadData.qualities.length > 0)
         );
 
-        if (isPlayable) {
-          // Pre-cache the successful response
-          const cacheKey = `stream:${provider.name}:${type}:${id}:${season}:${episode}:default:${clientIp || 'default'}`;
-          let ttl = 1800;
-          if (streamData.expires) {
-            const nowSec = Math.floor(Date.now() / 1000);
-            ttl = Math.max(0, streamData.expires - nowSec - 60);
-          }
-          if (ttl > 0) cache.set(cacheKey, streamData, ttl);
-
-          // First available provider in priority order becomes bestProvider
-          if (!bestProvider) bestProvider = provider.name;
-
-          results.push({
-            name: provider.name,
-            status: 'available',
-            qualities: streamData.qualities?.map(q => q.quality) || [],
-            variants: streamData.variants || [],
-            streamType: streamData.streamType || null,
-            embedUrl: streamData.embedUrl || null
-          });
+        if (hasDirectStreams) {
+          logger.info(`[DownloadP] ✓ RESOLVED via ${provider.displayName}`);
+          return {
+            ...downloadData,
+            selectedProvider: provider.name,
+            available: true,
+          };
         } else {
-          results.push({ name: provider.name, status: 'unavailable' });
+          logger.warn(`[DownloadP] ✗ ${provider.displayName} returned no downloadable streams. Continuing...`);
         }
       } catch (err) {
-        logger.debug(`[AvailabilityCheck] Provider ${provider.displayName} is unavailable/offline: ${err.message}`);
-        results.push({ name: provider.name, status: 'offline' });
+        // Embed-only providers (Peachify) throw NotSupported — expected, skip silently.
+        logger.warn(`[DownloadP] ✗ ${provider.displayName} skipped: ${err.message}. Continuing to next provider...`);
       }
     }
 
+    logger.warn(`[DownloadP] All providers exhausted for TMDB ${tmdbId}. No download stream available.`);
     return {
-      available: !!bestProvider,
-      providers: results,
-      bestProvider
+      available: false,
+      reason: 'No provider supports direct download for this title',
     };
   }
 }

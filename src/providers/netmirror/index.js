@@ -183,6 +183,10 @@ class NetMirrorProvider extends BaseProvider {
     try {
       return await httpClient.get(url, options);
     } catch (err) {
+      if (err.response && err.response.status === 429) {
+        logger.warn(`[NetMirror] Direct request got 429 Rate Limit. Propagating immediately.`);
+        throw err;
+      }
       logger.warn(`[NetMirror] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
       const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}`;
       try {
@@ -272,6 +276,8 @@ class NetMirrorProvider extends BaseProvider {
 
     const variantsUrl = `${config.netmirror.baseUrl}/api/variants-tmdb/${resolvedType}/${resolvedId}?se=${season}&ep=${episode}`;
     let variantsData = null;
+    let variantQueue = [];
+    let allVariants = [];
 
     // Construct headers for forwarding client IP to avoid IP-mismatched signatures
     const requestOptions = {};
@@ -296,155 +302,246 @@ class NetMirrorProvider extends BaseProvider {
       variantsData = this.getCapturedResponse(variantsUrl);
     }
 
-    if (!variantsData || !variantsData.ok) {
-      // --- DIRECT EMBED FALLBACK ---
-      // Some titles (e.g. Amaran/927342) have variants:[] on net27.cc but are still
-      // streamable via a direct embed-tmdb call (served through Peachify or similar).
-      logger.info(`[NetMirror] No variants for ID ${resolvedId}. Attempting direct embed without variant...`);
-      const directEmbedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}`;
-      let directEmbedData = null;
-
+    if (variantsData && variantsData.ok) {
+      // Dynamically register live variants to TMDB ID map
       try {
-        directEmbedData = await this.netmirrorGet(directEmbedUrl, requestOptions);
-        if (!directEmbedData || !directEmbedData.ok) {
-          throw new Error('Direct embed returned non-ok');
+        let registeredAny = false;
+        const registerVariant = (vId) => {
+          if (vId && !this.variantToTmdb.has(String(vId))) {
+            this.variantToTmdb.set(String(vId), { tmdbId: resolvedId, type: resolvedType });
+            registeredAny = true;
+          }
+        };
+
+        if (variantsData.defaultSubjectId) {
+          registerVariant(variantsData.defaultSubjectId);
         }
-      } catch (err) {
-        logger.warn(`[NetMirror] Direct embed live request failed. Trying capture. Reason: ${err.message}`);
-        directEmbedData = this.getCapturedResponse(directEmbedUrl);
+        if (variantsData.variants && Array.isArray(variantsData.variants)) {
+          variantsData.variants.forEach(v => {
+            registerVariant(v.dubSubjectId);
+            registerVariant(v.id);
+          });
+        }
+
+        if (registeredAny) {
+          this.saveDynamicVariants();
+        }
+      } catch (e) {
+        logger.debug(`[NetMirror] Failed to dynamically register variants: ${e.message}`);
       }
 
-      if (directEmbedData && directEmbedData.ok) {
-        logger.info(`[NetMirror] Direct embed succeeded for ID ${resolvedId}`);
-        const normalized = normalizeNetMirrorStream(directEmbedData);
-        if (normalized) {
-          normalized.variants = [];
-        }
-        return normalized;
-      }
+      // Build priority-ordered variant list
+      allVariants = (variantsData.variants || []).map(v => ({
+        id: String(v.dubSubjectId || v.id),
+        language: v.language || 'Default'
+      }));
 
-      throw new Error(`Could not retrieve variants for ID ${resolvedId} (Season ${season}, Episode ${episode})`);
-    }
-
-    // Dynamically register live variants to TMDB ID map
-    try {
-      let registeredAny = false;
-      const registerVariant = (vId) => {
-        if (vId && !this.variantToTmdb.has(String(vId))) {
-          this.variantToTmdb.set(String(vId), { tmdbId: resolvedId, type: resolvedType });
-          registeredAny = true;
+      const seenIds = new Set();
+      const enqueue = (vid) => {
+        const sid = String(vid);
+        if (vid && !seenIds.has(sid)) {
+          seenIds.add(sid);
+          variantQueue.push(sid);
         }
       };
 
-      if (variantsData.defaultSubjectId) {
-        registerVariant(variantsData.defaultSubjectId);
-      }
-      if (variantsData.variants && Array.isArray(variantsData.variants)) {
-        variantsData.variants.forEach(v => {
-          registerVariant(v.dubSubjectId);
-          registerVariant(v.id);
-        });
-      }
+      // 1. User-specified / explicitly requested variant
+      if (variantId) enqueue(variantId);
 
-      if (registeredAny) {
-        this.saveDynamicVariants();
-      }
-    } catch (e) {
-      logger.debug(`[NetMirror] Failed to dynamically register variants: ${e.message}`);
-    }
-
-    // 2. Select target variant ID
-    let targetVariant = variantId;
-    if (!targetVariant) {
-      if (variantsData.defaultSubjectId) {
-        targetVariant = variantsData.defaultSubjectId;
-      } else if (variantsData.variants && variantsData.variants.length > 0) {
-        // Prefer Tamil or Hindi or English dub/sub if available, otherwise grab the first
-        const pref = variantsData.variants.find(v => 
-          v.language.toLowerCase().includes('hindi') || 
-          v.language.toLowerCase().includes('tamil') ||
-          v.language.toLowerCase().includes('english')
+      // 2-4. Language preferences
+      const langPrefs = ['tamil', 'hindi', 'english'];
+      for (const lang of langPrefs) {
+        const match = variantsData.variants && variantsData.variants.find(
+          v => v.language && v.language.toLowerCase().includes(lang)
         );
-        targetVariant = pref ? pref.dubSubjectId : variantsData.variants[0].dubSubjectId;
+        if (match) enqueue(match.dubSubjectId || match.id);
+      }
+
+      // 5. API default
+      if (variantsData.defaultSubjectId) enqueue(variantsData.defaultSubjectId);
+
+      // 6. All remaining in API order
+      (variantsData.variants || []).forEach(v => enqueue(v.dubSubjectId || v.id));
+
+      if (variantQueue.length > 5) {
+        logger.debug(`[NetMirror] Capping variant queue from ${variantQueue.length} to 5 candidates to prevent rate limits`);
+        variantQueue = variantQueue.slice(0, 5);
       }
     }
 
-    if (!targetVariant) {
-      throw new Error(`No stream variants available for ID ${resolvedId}`);
-    }
-
-    logger.debug(`[NetMirror] Selected variant ID: ${targetVariant}`);
-
-    // 3. Get stream embed details
-    const embedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}&dub=${targetVariant}`;
-    let embedData = null;
-
-    try {
-      embedData = await this.netmirrorGet(embedUrl, requestOptions);
-    } catch (err) {
-      logger.warn(`[NetMirror] Live request failed for embed. Falling back to capture. Error: ${err.message}`);
-      embedData = this.getCapturedResponse(embedUrl);
-    }
-
-    if (!embedData || !embedData.ok) {
-      throw new Error(`Could not retrieve streaming embed data for ID ${resolvedId} with variant ${targetVariant}`);
-    }
-
-    const variants = (variantsData.variants || []).map(v => ({
-      id: String(v.dubSubjectId || v.id),
-      language: v.language || 'Default'
-    }));
-
-    // 4. Normalize and return
-    const normalized = normalizeNetMirrorStream(embedData);
-    if (normalized) {
-      normalized.variants = variants;
-
-      // Programmatically check if the signature is expired
-      if (normalized.expires) {
-        const nowSec = Math.floor(Date.now() / 1000);
-        if (normalized.expires - nowSec < 60) {
-          logger.warn(`[NetMirror] Stream URL signature is expired or expiring soon (expires at ${new Date(normalized.expires * 1000).toISOString()}). Discarding NetMirror stream.`);
-          throw new Error('Stream signature expired');
+    // -- CDN URL check helper --------------------------------------------------------
+    // IMPORTANT: Must use axios directly, NOT via CF Worker, because CDN tokens are
+    // IP-signed for THIS server's outbound IP. A proxy introduces a different source
+    // IP which causes 403.
+    const isCdnUrlPlayable = async (testUrl) => {
+      if (!testUrl) return false;
+      try {
+        const res = await axios.get(testUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': `${config.netmirror.baseUrl}/`,
+            'Range': 'bytes=0-10'
+          },
+          timeout: 5000,
+          validateStatus: false
+        });
+        if (res.status === 403 || res.status === 404) {
+          logger.warn(`[NetMirror] CDN returned ${res.status} (token expired or IP mismatch).`);
+          return false;
         }
+        logger.info(`[NetMirror] CDN URL verified OK (Status: ${res.status}).`);
+        return true;
+      } catch (err) {
+        logger.warn(`[NetMirror] CDN URL check network error: ${err.message}`);
+        return false;
       }
+    };
 
-      // Check stream URL connectivity to make sure we don't serve a 403 Forbidden link.
-      // IMPORTANT: hakunaymatata.com CDN tokens are IP-signed for THIS server's IP (clientIp=null).
-      // We must fetch directly (NOT via a Cloudflare Worker proxy) so the requesting IP matches
-      // the signed token IP. Using a CF Worker introduces a different IP → 403.
-      const testUrl = normalized.streamUrl || (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
-      if (testUrl) {
-        logger.info(`[NetMirror] Testing stream URL connectivity for ID ${resolvedId}...`);
+    // -- Retry loop: try each variant in priority order ------------------------------
+    const failedVariants = [];
+
+    if (variantQueue.length > 0) {
+      logger.debug(`[NetMirror] Variant queue for ID ${resolvedId}: [${variantQueue.join(', ')}] (${variantQueue.length} candidate(s))`);
+
+      for (const candidateVariantId of variantQueue) {
+        logger.debug(`[NetMirror] Trying variant ${candidateVariantId} for ID ${resolvedId}...`);
+
+        // 3. Fetch embed data for this variant
+        const variantEmbedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}&dub=${candidateVariantId}`;
+        let embedData = null;
 
         try {
-          const axiosOptions = {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              'Referer': `${config.netmirror.baseUrl}/`,
-              'Range': 'bytes=0-10'
-            },
-            timeout: 5000,
-            validateStatus: false
-          };
-
-          // Fetch directly — no CF Worker wrapper. The CDN token is signed for this server's IP.
-          const res = await axios.get(testUrl, axiosOptions);
-
-          if (res.status === 403 || res.status === 404) {
-            logger.warn(`[NetMirror] Stream URL check returned ${res.status} (token expired or IP mismatch). Discarding stream.`);
-            // Throw unconditionally so cross-provider fallback activates in both dev and prod.
-            throw new Error(`Stream CDN returned ${res.status} - token expired or IP mismatch`);
-          } else {
-            logger.info(`[NetMirror] Stream URL verified OK (Status: ${res.status}).`);
-          }
+          embedData = await this.netmirrorGet(variantEmbedUrl, requestOptions);
         } catch (err) {
-          logger.warn(`[NetMirror] Stream connectivity check failed: ${err.message}. Discarding stream.`);
-          throw err; // Always throw — let apiController try Peachify fallback
+          if (err.response && err.response.status === 429) {
+            logger.error(`[NetMirror] Hit 429 Rate Limit on variant embed API. Aborting variants loop.`);
+            throw err;
+          }
+          logger.warn(`[NetMirror] Embed fetch failed for variant ${candidateVariantId}. Trying capture. Error: ${err.message}`);
+          embedData = this.getCapturedResponse(variantEmbedUrl);
         }
+
+        if (!embedData || !embedData.ok) {
+          logger.debug(`[NetMirror] Embed data unavailable for variant ${candidateVariantId}. Skipping.`);
+          failedVariants.push({ id: candidateVariantId, reason: 'embed_unavailable' });
+          continue;
+        }
+
+        // 4. Normalize
+        const normalized = normalizeNetMirrorStream(embedData);
+        if (!normalized) {
+          logger.debug(`[NetMirror] Normalization failed for variant ${candidateVariantId}. Skipping.`);
+          failedVariants.push({ id: candidateVariantId, reason: 'normalization_failed' });
+          continue;
+        }
+
+        // Validate if this normalized variant is actually playable (contains stream URLs or qualities or embedUrl)
+        const isPlayable = !!(
+          normalized.streamUrl ||
+          (normalized.qualities && normalized.qualities.length > 0) ||
+          normalized.embedUrl
+        );
+        if (!isPlayable) {
+          logger.warn(`[NetMirror] Variant ${candidateVariantId} returned no playable stream (mode: ${embedData.mode || 'unknown'}, error: ${embedData.error || 'none'}). Trying next.`);
+          failedVariants.push({ id: candidateVariantId, reason: 'empty_stream' });
+          continue;
+        }
+
+        // 5. Cheap expiry check (no network call)
+        if (normalized.expires) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (normalized.expires - nowSec < 60) {
+            logger.warn(`[NetMirror] Variant ${candidateVariantId} token expiring soon (exp: ${new Date(normalized.expires * 1000).toISOString()}). Trying next.`);
+            failedVariants.push({ id: candidateVariantId, reason: 'token_expired' });
+            continue;
+          }
+        }
+
+        // 6. CDN connectivity check -- validates signed URL works for this IP
+        const testUrl = normalized.streamUrl ||
+          (normalized.qualities && normalized.qualities[0] && normalized.qualities[0].url);
+
+        if (testUrl) {
+          logger.info(`[NetMirror] Testing stream URL connectivity for variant ${candidateVariantId}...`);
+          const cdnOk = await isCdnUrlPlayable(testUrl);
+          if (!cdnOk) {
+            failedVariants.push({ id: candidateVariantId, reason: 'cdn_403' });
+            logger.warn(`[NetMirror] Variant ${candidateVariantId} CDN returned 403. Trying next variant...`);
+            continue;
+          }
+        }
+
+        // This variant is playable -- return it
+        logger.info(`[NetMirror] Variant ${candidateVariantId} is playable for ID ${resolvedId}.`);
+        normalized.variants = allVariants;
+        return normalized;
       }
     }
-    return normalized;
+
+    // --- DIRECT EMBED FALLBACK ---
+    // If variants list was empty, OR if all processed variants were unplayable, expired, or failed:
+    logger.info(`[NetMirror] No variants or all variants failed for ID ${resolvedId}. Attempting direct embed without variant...`);
+    const directEmbedUrl = `${config.netmirror.baseUrl}/api/embed-tmdb/${resolvedId}?type=${resolvedType}&se=${season}&ep=${episode}`;
+    let directEmbedData = null;
+
+    try {
+      directEmbedData = await this.netmirrorGet(directEmbedUrl, requestOptions);
+      if (!directEmbedData || !directEmbedData.ok) {
+        throw new Error('Direct embed returned non-ok');
+      }
+    } catch (err) {
+      if (err.response && err.response.status === 429) {
+        logger.error(`[NetMirror] Hit 429 Rate Limit on direct embed API.`);
+        throw err;
+      }
+      logger.warn(`[NetMirror] Direct embed live request failed. Trying capture. Reason: ${err.message}`);
+      directEmbedData = this.getCapturedResponse(directEmbedUrl);
+    }
+
+    if (directEmbedData && directEmbedData.ok) {
+      const normalized = normalizeNetMirrorStream(directEmbedData);
+      const isPlayable = !!(
+        normalized && (
+          normalized.streamUrl ||
+          (normalized.qualities && normalized.qualities.length > 0) ||
+          normalized.embedUrl
+        )
+      );
+
+      if (isPlayable) {
+        logger.info(`[NetMirror] Direct embed succeeded for ID ${resolvedId}`);
+        normalized.variants = [];
+        return normalized;
+      } else {
+        logger.warn(`[NetMirror] Direct embed response for ID ${resolvedId} contains no playable stream (mode: ${directEmbedData.mode || 'unknown'}, error: ${directEmbedData.error || 'none'}).`);
+      }
+    }
+
+    // All variants and direct embed options exhausted
+    if (variantQueue.length > 0) {
+      const failSummary = failedVariants.map(f => `${f.id}(${f.reason})`).join(', ');
+      logger.warn(`[NetMirror] All ${variantQueue.length} variant(s) exhausted for ID ${resolvedId}. [${failSummary}]`);
+      const streamErr = new Error(`STREAM_INVALID: All ${variantQueue.length} variant(s) returned invalid CDN URLs for ID ${resolvedId}. NetMirror catalog is online but CDN tokens are not valid for this server IP.`);
+      streamErr.code = 'STREAM_INVALID';
+      throw streamErr;
+    } else {
+      throw new Error(`STREAM_UNAVAILABLE: No playable streams or variants available on NetMirror for ID ${resolvedId}.`);
+    }
+  }
+
+  /**
+   * Indicates if this provider supports direct downloads
+   */
+  get downloadSupported() {
+    return true;
+  }
+
+  /**
+   * download method
+   */
+  async download(id, type, season = 1, episode = 1, variantId = null) {
+    logger.debug(`[NetMirror] download() called for ID: ${id}, Type: ${type}, Season: ${season}, Episode: ${episode}, Variant: ${variantId}`);
+    return this.stream(id, type, season, episode, variantId, null);
   }
 
   /**

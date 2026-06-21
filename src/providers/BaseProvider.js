@@ -59,6 +59,14 @@ class BaseProvider {
   }
 
   /**
+   * Getter indicating if this provider supports direct downloads
+   * @returns {boolean}
+   */
+  get downloadSupported() {
+    return false;
+  }
+
+  /**
    * Get download stream details for a movie or TV show episode.
    * Embed-only providers (e.g. Peachify) should not override this — the default
    * throws NotSupported so the pipeline skips them for download requests.

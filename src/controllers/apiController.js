@@ -446,6 +446,7 @@ const apiController = {
           embedFallbacks: streamInfo.embedFallbacks || [],
           streams: [],
           subtitles: [],
+          variants: streamInfo.variants || [],
           stream: streamInfo
         });
       }
@@ -457,6 +458,7 @@ const apiController = {
         subjectId: id, // return original id string to match frontend validation
         streams: streamInfo.qualities || [],
         subtitles: streamInfo.subtitles || [],
+        variants: streamInfo.variants || [],
         stream: streamInfo
       });
     } catch (err) {
@@ -687,7 +689,8 @@ apiController.resolveStream = async function(req, res, next) {
       parsedType,
       seasonNum,
       episodeNum,
-      null
+      null,
+      variant || null
     );
 
     // If pipeline found nothing
@@ -750,6 +753,7 @@ apiController.resolveStream = async function(req, res, next) {
         embedFallbacks: streamResult.embedFallbacks || [],
         streams: [],
         subtitles: [],
+        variants: streamResult.variants || [],
         stream: streamResult
       });
     }
@@ -766,6 +770,7 @@ apiController.resolveStream = async function(req, res, next) {
       streamType: streamResult.streamType || 'native',
       streams: streamResult.qualities || [],
       subtitles: streamResult.subtitles || [],
+      variants: streamResult.variants || [],
       stream: streamResult
     });
   } catch (err) {
@@ -970,6 +975,102 @@ apiController.proxyStream = async function(req, res, next) {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Proxy streaming failed', message: err.message });
     }
+  }
+};
+
+/**
+ * GET /api/v2/download/tmdb/:tmdbId?type=movie|tv&season=1&episode=1
+ *
+ * Backend-controlled sequential download pipeline.
+ * The backend decides which provider to use — the frontend NEVER picks a provider.
+ * Provider order: always config.providerPriority (NetMirror first, Peachify is embed-only → skipped).
+ *
+ * ARCHITECTURE RULE: Only this endpoint may invoke provider.download().
+ * DetailPage / PlayerPage / any frontend code must call this endpoint,
+ * not getStreamV2(provider, id) with a frontend-chosen provider.
+ */
+apiController.resolveDownload = async function(req, res, next) {
+  try {
+    const { tmdbId } = req.params;
+    const { type, season, episode, variant } = req.query;
+
+    const parsedType = (type || 'movie').toLowerCase();
+    if (!['movie', 'tv'].includes(parsedType)) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Query parameter "type" must be "movie" or "tv".'
+      });
+    }
+
+    const seasonNum = season ? parseInt(season, 10) : 1;
+    const episodeNum = episode ? parseInt(episode, 10) : 1;
+
+    if (parsedType === 'tv' && (isNaN(seasonNum) || isNaN(episodeNum))) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'For type "tv", "season" and "episode" must be valid numbers.'
+      });
+    }
+
+    logger.info(`[ResolveDownload] Backend pipeline request for TMDB ${tmdbId} (${parsedType} S${seasonNum}E${episodeNum})`);
+
+    // Delegate 100% to ProviderManager — no provider selection here.
+    const downloadResult = await providerManager.resolveDownload(
+      tmdbId,
+      parsedType,
+      seasonNum,
+      episodeNum,
+      variant || null
+    );
+
+    if (!downloadResult.available) {
+      logger.warn(`[ResolveDownload] No provider available for download of TMDB ${tmdbId}`);
+      return res.status(404).json({
+        ok: false,
+        success: false,
+        available: false,
+        reason: downloadResult.reason || 'No provider supports download for this title',
+        streams: []
+      });
+    }
+
+    // Proxy download URLs through the backend stream proxy so the browser
+    // triggers a save-file dialog instead of navigating away.
+    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const host = req.get('host');
+    const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+    const proxyUrl = (originalUrl, streamHeaders) => {
+      if (!originalUrl) return '';
+      if (originalUrl.includes('/stream/proxy') || originalUrl.includes('/proxy-stream')) return originalUrl;
+      let pUrl = `${proxyBase}?url=${encodeURIComponent(originalUrl)}&download=true`;
+      if (streamHeaders && Object.keys(streamHeaders).length > 0) {
+        pUrl += `&headers=${encodeURIComponent(JSON.stringify(streamHeaders))}`;
+      }
+      return pUrl;
+    };
+
+    if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
+      downloadResult.qualities = downloadResult.qualities.map(q => ({
+        ...q,
+        url: proxyUrl(q.url, q.headers || downloadResult.headers)
+      }));
+    }
+    if (downloadResult.streamUrl) {
+      downloadResult.streamUrl = proxyUrl(downloadResult.streamUrl, downloadResult.headers);
+    }
+
+    res.json({
+      ok: true,
+      success: true,
+      available: true,
+      provider: downloadResult.selectedProvider,
+      selectedProvider: downloadResult.selectedProvider,
+      subjectId: String(tmdbId),
+      streams: downloadResult.qualities || [],
+      stream: downloadResult
+    });
+  } catch (err) {
+    next(err);
   }
 };
 

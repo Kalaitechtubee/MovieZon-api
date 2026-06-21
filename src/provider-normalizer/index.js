@@ -75,7 +75,11 @@ function normalizeStream(data, providerName) {
     subtitles,
     headers: data.headers || {},
     qualities,
-    expires: data.expires ? parseInt(data.expires, 10) : null
+    expires: data.expires ? parseInt(data.expires, 10) : null,
+    variants: data.variants || [],
+    streamType: data.streamType || null,
+    embedUrl: data.embedUrl || null,
+    embedFallbacks: data.embedFallbacks || []
   };
 }
 
