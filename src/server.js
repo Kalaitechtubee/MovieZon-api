@@ -7,7 +7,6 @@ const http = require('http');
 const app = require('./app');
 const config = require('./config');
 const logger = require('./logger');
-const healthService = require('./provider-health');
 
 
 // Create HTTP Server
@@ -22,19 +21,12 @@ server.listen(config.port, () => {
   logger.info(` Port        : ${config.port}`);
   logger.info(` Base URL    : http://localhost:${config.port}`);
   logger.info(`=================================================`);
-
-  // Start background health checking for providers
-  // Runs every 5 minutes (300000ms)
-  healthService.startHealthChecks(300000);
 });
 
 // Graceful Shutdown
 const handleShutdown = (signal) => {
   logger.info(`Received ${signal}. Shutting down gracefully...`);
   
-  // Stop background activities
-  healthService.stopHealthChecks();
-
   // Stop accepting new connections
   server.close(() => {
     logger.info('HTTP server closed.');

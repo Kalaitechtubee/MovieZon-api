@@ -11,7 +11,7 @@ const config = {
   // Providers config — order defines the deterministic resolution pipeline.
   // Provider 1 (index 0) is always tried first. Fallback proceeds in order.
   // To add a new provider: create its folder, then append its name here.
-  providerPriority: (process.env.PROVIDER_PRIORITY || 'netmirror,peachify')
+  providerPriority: (process.env.PROVIDER_PRIORITY || 'peachify')
     .split(',')
     .map(p => p.trim().toLowerCase())
     .filter(Boolean),

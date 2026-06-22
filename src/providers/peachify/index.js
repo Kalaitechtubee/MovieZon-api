@@ -1,235 +1,68 @@
 const BaseProvider = require('../BaseProvider');
-const httpClient = require('../../utils/httpClient');
 const logger = require('../../logger');
-const { normalizeCatalogItem, normalizeStream } = require('../../provider-normalizer');
-const axios = require('axios');
-const { webcrypto } = require('crypto');
-const config = require('../../config');
-
-const PEACHIFY_BASE = 'https://peachify.top';
-const NETMIRROR_BASE = 'https://net27.cc';
-const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
-
-const { URL } = require('url');
-let proxyConfig = null;
-let proxyDisabledUntil = 0; // Timestamp to bypass broken proxy temporarily
-if (config.proxyUrl) {
-  try {
-    const parsedProxy = new URL(config.proxyUrl);
-    proxyConfig = {
-      protocol: parsedProxy.protocol.replace(':', ''),
-      host: parsedProxy.hostname,
-      port: parseInt(parsedProxy.port, 10),
-    };
-    if (parsedProxy.username || parsedProxy.password) {
-      proxyConfig.auth = {
-        username: decodeURIComponent(parsedProxy.username),
-        password: decodeURIComponent(parsedProxy.password)
-      };
-    }
-    logger.info(`[Peachify] Proxy configured successfully: ${proxyConfig.host}:${proxyConfig.port}`);
-  } catch (e) {
-    logger.warn(`[Peachify] Failed to parse PROXY_URL: ${e.message}`);
-  }
-}
-
-
-function dC(e) {
-  let t = e.replace(/-/g, "+").replace(/_/g, "/"),
-      i = t.length % 4 == 0 ? "" : "=".repeat(4 - t.length % 4),
-      r = Buffer.from(t + i, 'base64').toString('binary'),
-      s = new Uint8Array(r.length);
-  for (let e = 0; e < r.length; e++) {
-    s[e] = r.charCodeAt(e);
-  }
-  return s;
-}
-
-async function dP(e) {
-  let t = new Uint8Array(e.match(/.{1,2}/g).map(e => parseInt(e, 16)));
-  return await webcrypto.subtle.importKey("raw", t, {name: "AES-GCM"}, false, ["decrypt"]);
-}
-
-async function dD(e, t) {
-  try {
-    let [i, r, s] = e.split(".");
-    let n = dC(i),
-        a = dC(r),
-        l = dC(s);
-    let o = new Uint8Array(a.length + l.length);
-    o.set(a, 0);
-    o.set(l, a.length);
-    let u = await dP(t);
-    let d = await webcrypto.subtle.decrypt({name: "AES-GCM", iv: n}, u, o);
-    let h = new TextDecoder().decode(d);
-    return JSON.parse(h);
-  } catch (err) {
-    logger.warn(`Decryption failed: ${err.message}`);
-    return null;
-  }
-}
+const { normalizeCatalogItem, normalizeStream } = require('../../utils/normalizer');
+const { getEmbedUrl } = require('./player');
+const { peachifyGet } = require('./utils');
 
 class PeachifyProvider extends BaseProvider {
   constructor() {
     super('peachify');
   }
 
-  async peachifyGet(url, options = {}) {
-    const reqOptions = { ...options };
-    let usedProxy = false;
-    const now = Date.now();
-    if (proxyConfig && now > proxyDisabledUntil) {
-      reqOptions.proxy = proxyConfig;
-      usedProxy = true;
-    }
-    
-    let lastError = null;
-    try {
-      return await axios.get(url, reqOptions);
-    } catch (err) {
-      lastError = err;
-      if (usedProxy) {
-        logger.warn(`[Peachify] Proxy request failed for: ${url}. Error: ${err.message}. Retrying TRULY directly (without proxy)...`);
-        
-        // If the error is proxy-specific (status 402, 407) or connection/timeout error on the proxy,
-        // temporarily bypass the proxy for subsequent requests (e.g., 5 minutes)
-        const isProxyStatusError = err.response && (err.response.status === 402 || err.response.status === 407);
-        const isProxyNetError = err.code && ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EHOSTUNREACH'].includes(err.code);
-        if (isProxyStatusError || isProxyNetError) {
-          proxyDisabledUntil = Date.now() + 5 * 60 * 1000;
-          logger.warn(`[Peachify] Proxy returned error (${err.message}). Bypassing proxy for 5 minutes.`);
-        }
-
-        try {
-          const directOptions = { ...options };
-          return await axios.get(url, { ...directOptions, proxy: false });
-        } catch (directErr) {
-          lastError = directErr;
-          logger.warn(`[Peachify] Truly direct request also failed for: ${url}. Error: ${directErr.message}. Retrying via Cloudflare Worker proxy...`);
-        }
-      } else {
-        logger.warn(`[Peachify] Direct request failed for: ${url}. Error: ${err.message}. Retrying via Cloudflare Worker proxy...`);
-      }
-
-      // Encode the required headers into the query string so the CF worker
-      // forwards them to eat-peach.sbs. This allows fetching even when
-      // the server's IP (e.g. Render's) is blocked by the upstream API.
-      const headersToForward = options.headers
-        ? JSON.stringify(options.headers)
-        : JSON.stringify({
-            'Referer': 'https://peachify.top/',
-            'Origin': 'https://peachify.top',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          });
-      const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
-      try {
-        const res = await axios.get(proxyUrl, { timeout: options.timeout || 8000 });
-        logger.info(`[Peachify Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
-        return res;
-      } catch (proxyErr) {
-        lastError = proxyErr;
-        logger.error(`[Peachify Proxy] Cloudflare Worker proxy request also failed: ${proxyErr.message}`);
-        throw lastError;
-      }
-    }
-  }
-
   /**
    * Search - not directly supported by Peachify; always returns empty.
-   * Search is handled by TMDB / NetMirror.
    */
-  async search(_query) {
+  async search(query) {
     return [];
   }
 
   /**
-   * Details - delegates to NetMirror catalog or TMDB.
-   * Peachify doesn't have its own catalog metadata.
+   * Details - stub implementation (enriched by TMDB details later in provider manager)
    */
   async details(id, type) {
-    const registry = require('../../provider-registry');
-    const netmirror = registry.get('netmirror');
-    let resolvedId = id;
-    if (netmirror && typeof netmirror.resolveTmdbId === 'function') {
-      resolvedId = netmirror.resolveTmdbId(id);
-    }
-
-    // Try to get basic info from net27.cc catalog endpoint
-    const detailUrl = `${NETMIRROR_BASE}/api/catalog/title/${type}/${resolvedId}`;
-    try {
-      const data = await httpClient.get(detailUrl);
-      if (data && data.ok) {
-        data.tmdbId = data.tmdbId || resolvedId;
-        return normalizeCatalogItem(data, 'peachify');
-      }
-    } catch (err) {
-      logger.debug(`[Peachify] details() live request failed for ID ${resolvedId}: ${err.message}`);
-    }
-
-    // Minimal stub so the details page still renders
     return normalizeCatalogItem({
-      tmdbId: resolvedId,
-      id: String(resolvedId),
+      tmdbId: id,
+      id: String(id),
       title: '',
       type: type || 'movie'
     }, 'peachify');
   }
 
   /**
-   * Stream - returns the Peachify embed URL as an iframe-type stream.
-   * The frontend renders this in an <iframe> instead of a native video player.
+   * Fast existence check. Peachify supports embed player if title has metadata.
    */
-  async stream(id, type = 'movie', season = 1, episode = 1, _variantId = null, _clientIp = null) {
+  async exists(id, type) {
+    return true;
+  }
+
+  /**
+   * Stream - returns the Peachify embed iframe video player
+   */
+  async stream(id, type = 'movie', season = 1, episode = 1, variantId = null, clientIp = null) {
     logger.debug(`[Peachify] stream() called for ID: ${id}, Type: ${type}, S${season}E${episode}`);
+    
+    const embedInfo = getEmbedUrl(id, type, season, episode);
 
-    const registry = require('../../provider-registry');
-    const netmirror = registry.get('netmirror');
-    let resolvedId = id;
-    if (netmirror && typeof netmirror.resolveTmdbId === 'function') {
-      resolvedId = netmirror.resolveTmdbId(id);
-    }
-
-    const mediaType = type === 'tv' ? 'tv' : 'movie';
-    let embedUrl;
-
-    if (mediaType === 'tv') {
-      embedUrl = `${PEACHIFY_BASE}/embed/tv/${resolvedId}/${season}/${episode}`;
-    } else {
-      embedUrl = `${PEACHIFY_BASE}/embed/movie/${resolvedId}`;
-    }
-
-    // Return Peachify embed player stream directly as Peachify is embed-only
-    const fallbackEmbeds = [embedUrl];
-    if (mediaType === 'tv') {
-      fallbackEmbeds.push(
-        `https://vidsrc.to/embed/tv/${resolvedId}/${season}/${episode}`,
-        `https://autoembed.cc/tv/${resolvedId}-${season}-${episode}`,
-        `https://embed.su/embed/tv/${resolvedId}/${season}/${episode}`
-      );
-    } else {
-      fallbackEmbeds.push(
-        `https://vidsrc.to/embed/movie/${resolvedId}`,
-        `https://autoembed.cc/movie/${resolvedId}`,
-        `https://embed.su/embed/movie/${resolvedId}`
-      );
-    }
-
-    const primaryFallbackEmbed = fallbackEmbeds[0];
-    logger.info(`[Peachify] Returning Peachify embed player stream: ${primaryFallbackEmbed}`);
-
-    return {
+    return normalizeStream({
       provider: 'peachify',
       drm: false,
       streamUrl: '',
-      embedUrl: primaryFallbackEmbed,
-      embedFallbacks: fallbackEmbeds,
+      embedUrl: embedInfo.embedUrl,
+      embedFallbacks: embedInfo.embedFallbacks,
       streamType: 'embed',
       subtitles: [],
       headers: {},
       qualities: [],
       variants: [],
       expires: null
-    };
+    }, 'peachify');
+  }
+
+  /**
+   * Peachify is embed-only, so this returns available: false and throws error if resolved.
+   */
+  async download(id, type, season = 1, episode = 1, variantId = null) {
+    throw new Error(`Provider ${this.displayName} does not support direct downloads.`);
   }
 
   /**
@@ -238,7 +71,8 @@ class PeachifyProvider extends BaseProvider {
   async health() {
     const startTime = Date.now();
     try {
-      await httpClient.get(PEACHIFY_BASE, { timeout: 5000, retries: 0 });
+      // Use helper peachifyGet to test peachify connection
+      await peachifyGet('https://peachify.top', { timeout: 5000 });
       const duration = Date.now() - startTime;
       return { status: 'healthy', message: 'Peachify reachable', responseTimeMs: duration };
     } catch (err) {

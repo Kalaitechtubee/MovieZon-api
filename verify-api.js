@@ -7,7 +7,6 @@ const axios = require('axios');
 const { spawn } = require('child_process');
 const path = require('path');
 
-
 // Test Config
 const port = process.env.PORT || 3000;
 const baseUrl = `http://localhost:${port}/api`;
@@ -22,7 +21,7 @@ function startServer() {
       stdio: 'inherit'
     });
 
-    // Wait 2.5 seconds for server to bind port and load capture file
+    // Wait 2.5 seconds for server to bind port and load
     setTimeout(() => {
       console.log('Server should be ready. Running assertions...\n');
       resolve();
@@ -72,20 +71,20 @@ async function runTests() {
 
       console.log('Registered Providers:', JSON.stringify(data.providers, null, 2));
 
-      // Assert netmirror exists
-      const hasNetmirror = data.providers.some(p => p.name === 'netmirror');
-      if (!hasNetmirror) {
-        throw new Error('NetMirror provider is missing from registration.');
+      // Assert peachify exists
+      const hasPeachify = data.providers.some(p => p.name === 'peachify');
+      if (!hasPeachify) {
+        throw new Error('Peachify provider is missing from registration.');
       }
     });
 
-    // 2. Test Catalog Search (local index matching)
-    await assertResponse('GET /api/search?q=Dhurandhar', async () => {
-      const res = await axios.get(`${baseUrl}/search?q=Dhurandhar`);
+    // 2. Test Catalog Search (TMDB fallbacks)
+    await assertResponse('GET /api/search?q=Inception', async () => {
+      const res = await axios.get(`${baseUrl}/search?q=Inception`);
       const data = res.data;
 
       if (!data.ok || !Array.isArray(data.items) || data.items.length === 0) {
-        throw new Error('No search results returned for query "Dhurandhar"');
+        throw new Error('No search results returned for query "Inception"');
       }
 
       console.log(`Found ${data.items.length} result(s). Checking schema of first item:`);
@@ -101,13 +100,13 @@ async function runTests() {
       }
     });
 
-    // 3. Test Details Fetching (with capture fallback)
-    await assertResponse('GET /api/details/netmirror/1291608?type=movie', async () => {
-      const res = await axios.get(`${baseUrl}/details/netmirror/1291608?type=movie`);
+    // 3. Test Details Fetching (with TMDB enrichment)
+    await assertResponse('GET /api/details/peachify/27205?type=movie', async () => {
+      const res = await axios.get(`${baseUrl}/details/peachify/27205?type=movie`);
       const data = res.data;
 
       if (!data.ok || !data.details) {
-        throw new Error('Could not fetch details for TMDB movie 1291608');
+        throw new Error('Could not fetch details for TMDB movie 27205');
       }
 
       console.log('Details metadata:', JSON.stringify(data.details, null, 2));
@@ -121,13 +120,13 @@ async function runTests() {
       }
     });
 
-    // 4. Test Stream Resolution (with capture fallback)
-    await assertResponse('GET /api/stream/netmirror/1291608?type=movie', async () => {
-      const res = await axios.get(`${baseUrl}/stream/netmirror/1291608?type=movie`);
+    // 4. Test Stream Resolution (Peachify embed player)
+    await assertResponse('GET /api/stream/peachify/27205?type=movie', async () => {
+      const res = await axios.get(`${baseUrl}/stream/peachify/27205?type=movie`);
       const data = res.data;
 
       if (!data.ok || !data.stream) {
-        throw new Error('Could not resolve stream details for TMDB movie 1291608');
+        throw new Error('Could not resolve stream details for TMDB movie 27205');
       }
 
       console.log('Stream Details resolved:', JSON.stringify(data.stream, null, 2));
