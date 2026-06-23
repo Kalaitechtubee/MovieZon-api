@@ -56,7 +56,12 @@ const apiController = {
         });
       }
 
-      let details = await providerManager.details(provider, id, parsedType.toLowerCase());
+      let details = null;
+      try {
+        details = await providerManager.details(provider, id, parsedType.toLowerCase());
+      } catch (err) {
+        logger.warn(`Failed to resolve details for provider ${provider} ID ${id}: ${err.message}`);
+      }
 
       if (details) {
         res.json({
@@ -94,10 +99,16 @@ const apiController = {
       const parsedType = type.toLowerCase();
       logger.info(`[UnifiedDetails] TMDB ${id} (${parsedType}) — resolveDetails() pipeline`);
 
-      let finalDetails = await providerManager.resolveDetails(id, parsedType);
+      let finalDetails = null;
+      try {
+        finalDetails = await providerManager.resolveDetails(id, parsedType);
+      } catch (err) {
+        logger.warn(`Failed to resolve unified details for TMDB ID ${id}: ${err.message}`);
+      }
 
       if (!finalDetails) {
         return res.status(404).json({
+          success: false,
           error: 'Not Found',
           message: `Details for ${parsedType} ID ${id} not found.`
         });
@@ -153,15 +164,52 @@ const apiController = {
         });
       }
 
-      let streamInfo = await providerManager.stream(
-        provider,
-        parsedId,
-        parsedType.toLowerCase(),
-        seasonNum,
-        episodeNum,
-        variant || null,
-        null
-      );
+      let streamInfo = null;
+      try {
+        streamInfo = await providerManager.stream(
+          provider,
+          parsedId,
+          parsedType.toLowerCase(),
+          seasonNum,
+          episodeNum,
+          variant || null,
+          null
+        );
+      } catch (err) {
+        logger.warn(`Error resolving primary stream for provider "${provider}": ${err.message}`);
+      }
+
+      // Fallback logic if primary stream resolution yielded nothing (e.g. unregistered provider, or scraper error)
+      if (!streamInfo && req.query.sources) {
+        logger.info(`Attempting fallback stream resolution for provider "${provider}" using sources: ${req.query.sources}`);
+        const sourceList = String(req.query.sources).split(',');
+        for (const source of sourceList) {
+          const partIndex = source.indexOf(':');
+          if (partIndex === -1) continue;
+          const fallbackProvider = source.substring(0, partIndex).trim();
+          const fallbackId = source.substring(partIndex + 1).trim();
+
+          try {
+            logger.info(`Trying fallback provider: "${fallbackProvider}" with ID: "${fallbackId}"`);
+            const result = await providerManager.stream(
+              fallbackProvider,
+              fallbackId,
+              parsedType.toLowerCase(),
+              seasonNum,
+              episodeNum,
+              variant || null,
+              null
+            );
+            if (result) {
+              logger.info(`Successfully resolved fallback stream via provider: "${fallbackProvider}"`);
+              streamInfo = result;
+              break;
+            }
+          } catch (fallbackErr) {
+            logger.warn(`Fallback to provider "${fallbackProvider}" failed: ${fallbackErr.message}`);
+          }
+        }
+      }
 
       if (!streamInfo) {
         return res.status(404).json({

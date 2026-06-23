@@ -147,7 +147,23 @@ async function runTests() {
       }
     });
 
-    // 5. Test Main Health status
+    // 5. Test Fallback Stream Resolution (prime provider with peachify source)
+    await assertResponse('GET /api/stream/prime/119?type=movie&sources=peachify:27205', async () => {
+      const res = await axios.get(`${baseUrl}/stream/prime/119?type=movie&sources=peachify:27205`);
+      const data = res.data;
+
+      if (!data.ok || !data.stream) {
+        throw new Error('Could not resolve fallback stream details for prime/peachify');
+      }
+
+      console.log('Fallback Stream Details resolved:', JSON.stringify(data.stream, null, 2));
+
+      if (data.stream.provider !== 'peachify') {
+        throw new Error(`Expected fallback provider to resolve to "peachify", got "${data.stream.provider}"`);
+      }
+    });
+
+    // 6. Test Main Health status
     await assertResponse('GET /api/health', async () => {
       const res = await axios.get(`${baseUrl}/health`);
       const data = res.data;

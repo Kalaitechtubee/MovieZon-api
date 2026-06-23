@@ -165,7 +165,8 @@ class ProviderManager {
   async stream(providerName, id, type, season = 1, episode = 1, variantId = null, clientIp = null) {
     const provider = this.get(providerName);
     if (!provider) {
-      throw new Error(`Provider "${providerName}" is not registered.`);
+      logger.warn(`Provider "${providerName}" is not registered.`);
+      return null;
     }
 
     logger.info(`[Stream:explicit] Fetching stream for TMDB ${id} from provider: ${provider.displayName}`);
