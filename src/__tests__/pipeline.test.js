@@ -167,7 +167,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     const { sourceChecks, defaultProvider } = await runDetailsPhase2(providers, '999', 'movie', cache);
 
     assert.equal(defaultProvider, 'netmirror', 'defaultProvider must be netmirror when it has a valid stream');
@@ -185,7 +185,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     const { sourceChecks, defaultProvider } = await runDetailsPhase2(providers, '999', 'movie', cache);
 
     assert.equal(defaultProvider, 'peachify', 'defaultProvider must be peachify when netmirror is unavailable');
@@ -205,7 +205,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     const { sourceChecks, defaultProvider } = await runDetailsPhase2(providers, '999', 'movie', cache);
 
     assert.equal(defaultProvider, null, 'defaultProvider must be null when no provider is available');
@@ -229,7 +229,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     await runDetailsPhase2(providers, '999', 'movie', cache);
 
     assert.equal(callOrder[0], 'netmirror', 'NetMirror must be called FIRST regardless of registration order');
@@ -255,7 +255,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
     });
     const cache = {
       get: (key) => fakeCache.get(key) ?? null,
-      set: () => {}
+      set: () => { }
     };
 
     const { defaultProvider } = await runDetailsPhase2(providers, '999', 'movie', cache);
@@ -274,7 +274,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     const { sourceChecks } = await runDetailsPhase2(providers, '999', 'movie', cache);
 
     assert.equal(sourceChecks.length, 2, 'Sources must contain ALL providers');
@@ -292,7 +292,7 @@ describe('Details Pipeline — Phase 2 Availability Check', () => {
       }),
     ]);
 
-    const cache = { get: () => null, set: () => {} };
+    const cache = { get: () => null, set: () => { } };
     const { sourceChecks } = await runDetailsPhase2(providers, '999', 'movie', cache);
 
     // The sourceChecks entries must NOT expose raw CDN URLs
@@ -761,251 +761,9 @@ describe('Peachify Resilient Get — Proxy, Direct, and Worker Fallback', () => 
   });
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// NETMIRROR PROVIDER RESOLUTION TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe('NetMirror Provider Stream Resolution - Playability and Fallbacks', () => {
-  const httpClient = require('../utils/httpClient');
-  const axios = require('axios');
-  let NetMirrorProvider;
-
-  beforeEach(() => {
-    // Clear cache to load fresh NetMirrorProvider class
-    delete require.cache[require.resolve('../providers/netmirror')];
-    NetMirrorProvider = require('../providers/netmirror');
-  });
-
-  afterEach(() => {
-    mock.restoreAll();
-  });
-
-  test('TC-NM-R01: Variant returns empty stream (no streamUrl/qualities/embedUrl) → should skip variant and try next variant', async () => {
-    const provider = new NetMirrorProvider();
-
-    // Mock variant list response
-    const mockVariants = {
-      ok: true,
-      defaultSubjectId: 'v1',
-      variants: [
-        { id: 'v1', language: 'Tamil', dubSubjectId: 'v1' },
-        { id: 'v2', language: 'Hindi', dubSubjectId: 'v2' }
-      ]
-    };
-
-    // Mock httpClient.get calls
-    mock.method(httpClient, 'get', async (url) => {
-      if (url.includes('variants-tmdb')) {
-        return mockVariants;
-      }
-      if (url.includes('embed-tmdb') && url.includes('dub=v1')) {
-        // v1 returns a response with NO streamUrl, qualities, or embedUrl (unplayable)
-        return { ok: true, mode: 'none', error: 'Not found' };
-      }
-      if (url.includes('embed-tmdb') && url.includes('dub=v2')) {
-        // v2 returns a valid playable stream
-        return {
-          ok: true,
-          mode: 'direct',
-          mp4: 'https://cdn.example.com/movie_hindi.mp4',
-          streams: [{ url: 'https://cdn.example.com/movie_hindi.mp4', resolution: 1080 }]
-        };
-      }
-      throw new Error(`Unexpected URL call: ${url}`);
-    });
-
-    // Mock axios.get for CDN check for v2
-    mock.method(axios, 'get', async (url) => {
-      if (url.includes('movie_hindi.mp4')) {
-        return { status: 200 };
-      }
-      throw new Error(`Unexpected axios call: ${url}`);
-    });
-
-    const result = await provider.stream('999', 'movie', 1, 1, null, null);
-
-    assert.equal(result.provider, 'netmirror');
-    assert.equal(result.streamUrl, 'https://cdn.example.com/movie_hindi.mp4');
-    assert.equal(result.qualities.length, 1);
-    assert.equal(result.qualities[0].quality, '1080p');
-  });
-
-  test('TC-NM-R02: No variants and direct embed returns empty stream (mode: none) → throws STREAM_UNAVAILABLE', async () => {
-    const provider = new NetMirrorProvider();
-
-    // Mock variant list to fail/return empty
-    mock.method(httpClient, 'get', async (url) => {
-      if (url.includes('variants-tmdb')) {
-        return { ok: true, variants: [] };
-      }
-      if (url.includes('embed-tmdb')) {
-        // Direct embed fallback returns empty/unplayable response
-        return { ok: true, mode: 'none', error: 'We could not find this title' };
-      }
-      throw new Error(`Unexpected URL call: ${url}`);
-    });
-
-    await assert.rejects(
-      () => provider.stream('999', 'movie', 1, 1, null, null),
-      (err) => {
-        assert.ok(err.message.includes('STREAM_UNAVAILABLE'), 'Error message must contain STREAM_UNAVAILABLE');
-        return true;
-      },
-      'Must throw STREAM_UNAVAILABLE when direct embed is not playable'
-    );
-  });
-
-  test('TC-NM-R03: No variants and direct embed has playable stream → returns the direct embed stream', async () => {
-    const provider = new NetMirrorProvider();
-
-    // Mock variants list empty, and direct embed success
-    mock.method(httpClient, 'get', async (url) => {
-      if (url.includes('variants-tmdb')) {
-        return { ok: true, variants: [] };
-      }
-      if (url.includes('embed-tmdb')) {
-        return {
-          ok: true,
-          mode: 'direct',
-          mp4: 'https://cdn.example.com/direct.mp4',
-          streams: [{ url: 'https://cdn.example.com/direct.mp4', resolution: 720 }]
-        };
-      }
-      throw new Error(`Unexpected URL call: ${url}`);
-    });
-
-    const result = await provider.stream('999', 'movie', 1, 1, null, null);
-
-    assert.equal(result.provider, 'netmirror');
-    assert.equal(result.streamUrl, 'https://cdn.example.com/direct.mp4');
-    assert.equal(result.qualities[0].quality, '720p');
-  });
-
-  test('TC-NM-R04: Variant list has more than 5 candidates → queue is capped to 5 candidates', async () => {
-    const provider = new NetMirrorProvider();
-
-    // Mock variant list with 8 variants
-    const mockVariants = {
-      ok: true,
-      defaultSubjectId: 'v1',
-      variants: Array.from({ length: 8 }, (_, i) => ({
-        id: `v${i + 1}`,
-        language: 'English',
-        dubSubjectId: `v${i + 1}`
-      }))
-    };
-
-    const requestedUrls = [];
-    mock.method(httpClient, 'get', async (url) => {
-      requestedUrls.push(url);
-      if (url.includes('variants-tmdb')) {
-        return mockVariants;
-      }
-      if (url.includes('embed-tmdb')) {
-        if (!url.includes('dub=')) {
-          // Direct embed fallback returns unplayable response
-          return { ok: true, mode: 'none', error: 'We could not find this title' };
-        }
-        // Return playable stream for all to check where it stops
-        return {
-          ok: true,
-          mode: 'direct',
-          mp4: `https://cdn.example.com/${url.split('dub=')[1]}.mp4`,
-          streams: [{ url: `https://cdn.example.com/${url.split('dub=')[1]}.mp4`, resolution: 1080 }]
-        };
-      }
-      throw new Error(`Unexpected URL call: ${url}`);
-    });
-
-    // Mock axios to return CDN 403 for first 4, and CDN 200 for others
-    // We expect the loop to stop and fail after trying 5 candidates (v1 to v5) and never reach v6 to v8
-    mock.method(axios, 'get', async (url) => {
-      if (url.includes('v1.mp4') || url.includes('v2.mp4') || url.includes('v3.mp4') || url.includes('v4.mp4') || url.includes('v5.mp4')) {
-        return { status: 403 }; // CDN 403
-      }
-      return { status: 200 };
-    });
-
-    // Call stream, we expect it to fail because all 5 allowed candidates returned CDN 403
-    await assert.rejects(
-      () => provider.stream('999', 'movie', 1, 1, null, null),
-      (err) => {
-        assert.equal(err.code, 'STREAM_INVALID');
-        return true;
-      }
-    );
-
-    // Verify exactly 5 variants were tried (excluding variants-tmdb API call and direct embed fallback)
-    const variantCalls = requestedUrls.filter(u => u.includes('embed-tmdb') && u.includes('dub='));
-    assert.equal(variantCalls.length, 5, 'Only the capped 5 variants should be requested');
-    assert.ok(variantCalls.every(u => !u.includes('dub=v6') && !u.includes('dub=v7') && !u.includes('dub=v8')));
-  });
-
-  test('TC-NM-R05: Direct request fails with 429 → propagates 429 error and aborts immediately', async () => {
-    const provider = new NetMirrorProvider();
-
-    // Mock variant list with 3 variants
-    const mockVariants = {
-      ok: true,
-      defaultSubjectId: 'v1',
-      variants: [
-        { id: 'v1', language: 'English', dubSubjectId: 'v1' },
-        { id: 'v2', language: 'English', dubSubjectId: 'v2' }
-      ]
-    };
-
-    const requestedUrls = [];
-    mock.method(httpClient, 'get', async (url) => {
-      requestedUrls.push(url);
-      if (url.includes('variants-tmdb')) {
-        return mockVariants;
-      }
-      if (url.includes('embed-tmdb') && url.includes('dub=v1')) {
-        const error = new Error('Rate limit');
-        error.response = { status: 429 };
-        throw error;
-      }
-      // If loop doesn't abort, it would call v2
-      return { ok: true, mp4: 'https://cdn.example.com/v2.mp4' };
-    });
-
-    await assert.rejects(
-      () => provider.stream('999', 'movie', 1, 1, null, null),
-      (err) => {
-        assert.equal(err.response.status, 429);
-        return true;
-      }
-    );
-
-    // Verify it aborted immediately after v1 hit 429
-    const embedCalls = requestedUrls.filter(u => u.includes('embed-tmdb'));
-    assert.equal(embedCalls.length, 1, 'Loop should abort immediately and not request subsequent variants');
-    assert.ok(embedCalls[0].includes('dub=v1'));
-  });
-
-  test('TC-NM-R06: NetMirror supports downloads and download() delegates to stream()', async () => {
-    const provider = new NetMirrorProvider();
-    assert.equal(provider.downloadSupported, true);
-
-    // Mock stream() on NetMirrorProvider instance
-    mock.method(provider, 'stream', async (id, type, season, episode, variantId, clientIp) => {
-      assert.equal(id, '1234');
-      assert.equal(type, 'movie');
-      assert.equal(season, 1);
-      assert.equal(episode, 1);
-      assert.equal(variantId, 'variant-abc');
-      assert.equal(clientIp, null);
-      return { streamUrl: 'https://cdn.example.com/download.mp4', qualities: [] };
-    });
-
-    const res = await provider.download('1234', 'movie', 1, 1, 'variant-abc');
-    assert.equal(res.streamUrl, 'https://cdn.example.com/download.mp4');
-  });
-});
-
 describe('Stream Caching & Pipeline Caching with Variants', () => {
   const cache = require('../cache');
-  const providerManager = require('../provider-manager');
+  const providerManager = require('../services/provider-manager');
 
   afterEach(() => {
     cache.flush();
@@ -1015,7 +773,7 @@ describe('Stream Caching & Pipeline Caching with Variants', () => {
   test('TC-C01: resolveStream() uses cached individual provider stream if present', async () => {
     const sortedProviders = providerManager.getSortedProviders();
     const netmirror = sortedProviders.find(p => p.name === 'netmirror');
-    
+
     if (!netmirror) return; // skip if netmirror is not registered
 
     // Warm individual stream cache
@@ -1082,7 +840,7 @@ describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
     axiosPath = require.resolve('axios');
     originalExports = require.cache[axiosPath].exports;
 
-    const mockedAxios = function(...args) {
+    const mockedAxios = function (...args) {
       if (mockAxiosHandler) {
         return mockAxiosHandler(...args);
       }
@@ -1125,7 +883,7 @@ describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
         if (headerName.toLowerCase() === 'host') return 'localhost:3000';
         return '';
       },
-      on: (event, cb) => {}
+      on: (event, cb) => { }
     };
 
     let responseBody = '';

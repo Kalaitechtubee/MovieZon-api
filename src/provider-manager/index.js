@@ -138,7 +138,7 @@ async function parseAndEnrichHls(streamData) {
 async function fetchTmdbMetadata(id, type) {
   const { baseUrl, apiKey } = config.tmdb;
   const pathType = type.toLowerCase() === 'tv' ? 'tv' : 'movie';
-  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos,recommendations`;
+  const url = `${baseUrl}/${pathType}/${id}?api_key=${apiKey}&append_to_response=credits,videos,recommendations,watch/providers`;
 
   try {
     const response = await axios.get(url, { timeout: 5000 });
@@ -179,6 +179,28 @@ async function fetchTmdbMetadata(id, type) {
       mediaType: r.media_type || (r.first_air_date ? 'tv' : 'movie')
     }));
 
+    let watchProvider = null;
+    let watchProviderId = null;
+    const providersData = data['watch/providers']?.results;
+    if (providersData) {
+      const regionData = providersData.IN || providersData.US || Object.values(providersData)[0];
+      if (regionData) {
+        const streamOptions = regionData.flatrate || regionData.rent || regionData.buy || [];
+        if (streamOptions.length > 0) {
+          const name = streamOptions[0].provider_name.toLowerCase();
+          if (name.includes('netflix')) watchProvider = 'netflix';
+          else if (name.includes('amazon') || name.includes('prime')) watchProvider = 'prime';
+          else if (name.includes('disney') || name.includes('hotstar')) watchProvider = 'disney';
+          else if (name.includes('apple')) watchProvider = 'apple';
+          else if (name.includes('hulu')) watchProvider = 'hulu';
+          else if (name.includes('hbo') || name.includes('max')) watchProvider = 'max';
+          else watchProvider = name;
+
+          watchProviderId = String(streamOptions[0].provider_id);
+        }
+      }
+    }
+
     return {
       overview: data.overview || '',
       genres,
@@ -188,6 +210,8 @@ async function fetchTmdbMetadata(id, type) {
       trailer,
       seasons,
       recommendations,
+      provider: watchProvider,
+      providerId: watchProviderId,
       backdrop: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,
       poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
       rating: data.vote_average ? `TMDB ${data.vote_average.toFixed(1)}` : null,
@@ -210,6 +234,8 @@ async function enrichWithTmdb(data, type) {
 
     return {
       ...data,
+      provider: tmdbData.provider || data.provider || null,
+      providerId: tmdbData.providerId || data.providerId || null,
       cast: tmdbData.cast || [],
       director: tmdbData.director || '',
       trailer: tmdbData.trailer || null,
