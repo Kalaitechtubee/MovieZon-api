@@ -62,7 +62,6 @@ const apiController = {
         res.json({
           ok: true,
           success: true,
-          details,
           results: details
         });
       } else {
@@ -107,8 +106,6 @@ const apiController = {
       res.json({
         ok: true,
         success: true,
-        movie: finalDetails,
-        details: finalDetails,
         results: finalDetails
       });
     } catch (err) {

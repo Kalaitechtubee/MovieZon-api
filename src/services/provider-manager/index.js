@@ -4,6 +4,37 @@ const cache = require('../../cache');
 const logger = require('../../logger');
 const config = require('../../config');
 
+const languageMap = {
+  'ta': 'Tamil',
+  'te': 'Telugu',
+  'ml': 'Malayalam',
+  'kn': 'Kannada',
+  'hi': 'Hindi',
+  'en': 'English',
+  'bn': 'Bengali',
+  'mr': 'Marathi',
+  'gu': 'Gujarati',
+  'pa': 'Punjabi',
+  'ur': 'Urdu',
+  'or': 'Odia',
+  'as': 'Assamese',
+  'ko': 'Korean',
+  'ja': 'Japanese',
+  'zh': 'Chinese',
+  'es': 'Spanish',
+  'fr': 'French',
+  'de': 'German',
+  'it': 'Italian',
+  'ru': 'Russian',
+  'pt': 'Portuguese'
+};
+
+function getLanguageName(code) {
+  if (!code) return 'English';
+  const cleanCode = code.toLowerCase().trim();
+  return languageMap[cleanCode] || cleanCode.charAt(0).toUpperCase() + cleanCode.slice(1);
+}
+
 class ProviderManager {
   constructor() {
     this.providers = new Map();
@@ -58,6 +89,9 @@ class ProviderManager {
       throw new Error(`No TMDB metadata found for ${type} ID ${tmdbId}`);
     }
 
+    const nativeLang = getLanguageName(tmdbData.language || 'en');
+    const audioLangs = [nativeLang];
+
     // 2. Fetch stream details for Peachify to build embed links and confirm availability
     const peachify = this.providers.get('peachify');
     let isPlayable = false;
@@ -82,7 +116,7 @@ class ProviderManager {
         serverIndex: 1,
         available: isPlayable,
         downloadSupported: false,
-        languages: ['Original Audio'],
+        languages: audioLangs,
         streamType: 'embed',
         embedUrl: embedUrl,
         embedFallbacks: embedFallbacks,
@@ -90,21 +124,23 @@ class ProviderManager {
       }
     ];
 
+    // Determine the watch provider from TMDB metadata if valid, otherwise default to 'peachify'
+    const resolvedProvider = (tmdbData.provider && tmdbData.provider !== 'tmdb') ? tmdbData.provider : 'peachify';
+
     // 3. Build unified structured object and flat fields
     const result = {
       // Root level flat fields for frontend compatibility
       ...tmdbData,
       id: String(tmdbId),
-      provider: 'peachify',
+      provider: resolvedProvider,
       sources,
-      defaultProvider: 'peachify',
-      supportedAudio: ['Original Audio'],
+      defaultProvider: resolvedProvider,
+      supportedAudio: audioLangs,
       supportedSubtitles: [],
       supportedQualities: [],
       downloadAvailable: false,
 
       // Structured API contract fields
-      tmdb: tmdbData,
       player: {
         provider: 'peachify',
         type: 'iframe', // Peachify is iframe embed

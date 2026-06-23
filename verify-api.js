@@ -105,16 +105,16 @@ async function runTests() {
       const res = await axios.get(`${baseUrl}/details/peachify/27205?type=movie`);
       const data = res.data;
 
-      if (!data.ok || !data.details) {
+      if (!data.ok || !data.results) {
         throw new Error('Could not fetch details for TMDB movie 27205');
       }
 
-      console.log('Details metadata:', JSON.stringify(data.details, null, 2));
+      console.log('Details metadata:', JSON.stringify(data.results, null, 2));
 
       // Schema verification
       const requiredFields = ['id', 'provider', 'tmdbId', 'title', 'year', 'type', 'poster', 'backdrop', 'overview', 'rating'];
       for (const field of requiredFields) {
-        if (data.details[field] === undefined || data.details[field] === null) {
+        if (data.results[field] === undefined || data.results[field] === null) {
           throw new Error(`Details schema violation: missing field "${field}"`);
         }
       }
