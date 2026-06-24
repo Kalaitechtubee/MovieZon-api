@@ -22,6 +22,7 @@ router.get('/v2/details/:provider/:id', apiController.details);
 // IMPORTANT: These routes MUST be declared before their /:provider/:id counterparts so that
 // Express does not match "tmdb" as a :provider value.
 router.get('/v2/stream/tmdb/:tmdbId', apiController.resolveStream);
+router.get('/v2/stream/auto/:tmdbId', apiController.resolveStreamAuto);
 
 // Backend-controlled sequential download pipeline.
 // The backend decides which provider to use — the frontend NEVER picks a provider for downloads.

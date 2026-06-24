@@ -1,402 +1,272 @@
 # MovieZon API & Stream Flow Documentation
 
-This document provides a comprehensive technical overview of the **MovieZon Backend API**, detailing its plugin-based provider architecture, sequential multi-provider pipeline, variant retry logic, automatic cross-provider fallback, caching strategies, and the specialized proxy pipeline designed to deliver streams reliably.
+This document provides a comprehensive technical overview of the **MovieZon Backend API**, detailing its provider-driven architecture, resilient scraping pipeline, dynamic proxy rotation pool, HLS playlist rewriting proxy, secure download tokenization, caching policies, and core lifecycles.
 
 > [!IMPORTANT]
-> **Core Architecture Rules (enforced in code):**
-> 1. `TMDB = Metadata only`. TMDB is **never** a streaming or download provider.
-> 2. **Provider priority is always: NetMirror (P1) → Peachify (P2) → future providers**. Never parallel. Never race.
-> 3. `ProviderManager` is the **only** place that decides which provider handles a request.
-> 4. The Details endpoint **never** resolves stream URLs — only availability status.
-> 5. The frontend **never** selects a provider. It calls the backend pipeline endpoint.
+> **Core Architecture Rules (Enforced in Code):**
+> 1. **TMDB = Metadata & Discovery Only:** TMDB is **never** a streaming or download provider. It is the metadata source for titles, cast, genres, trailers, and seasons.
+> 2. **Peachify as Sole Provider:** The old NetMirror provider has been completely removed from the backend providers. Peachify is the only registered provider in `ProviderManager` and handles all playbacks and downloads.
+> 3. **ProviderManager is the Single Source of Truth:** `ProviderManager` handles all pipeline operations (`resolveDetails`, `resolveStream`, `resolveDownload`) and coordinates database queries, TMDB metadata fetches, caching, and fallback checks.
+> 4. **No Raw CDN Exposure:** Playback CDN links are proxy-redirected or run through Cloudflare Workers. Download CDN URLs are encrypted using secure AES-256-cbc tokens (`playerService.encryptToken`) and are never exposed as plain text to the frontend.
+> 5. **Frontend Agnosticism:** The frontend (React / Flutter) never selects a provider or scraper engine. It invokes backend pipeline endpoints and receives standardized responses.
 
 ---
 
 ## 🏗️ Architecture Overview
 
-MovieZon Backend is built on a **decoupled, provider-driven architecture**. The core server is agnostic to where media content is hosted or how third-party providers lay out their metadata.
+The backend acts as an intelligent proxy, catalog resolver, and security boundary between client applications (web/mobile) and the scraping APIs.
 
 ```mermaid
 graph TD
     Client[moviezon-frontend / Mobile App] -->|Express API| Server[Express Server Router]
-    Server --> Controllers[API Controllers - thin pass-through]
-    Controllers --> Manager[Provider Manager - single source of truth]
-    Manager --> Registry[Provider Registry]
-    Registry -->|Dynamic Scanning| Providers[Providers: BaseProvider]
-    Providers --> NetMirror[NetMirror Provider - P1]
-    Providers --> Peachify[Peachify Provider - P2]
-
-    NetMirror -->|Live HTTP → Capture Fallback| NetMirrorSource[(net27.cc API / net27.cc-capture.json)]
-    Peachify -->|Scraping / AES-GCM Decryption| PeachifySource[(eat-peach.sbs: Iron / Spider / Wolf / Multi / Dark)]
-
-    NetMirror -->|CDN URL signed for server IP| CDN[(hakunaymatata.com CDN)]
-    CDN -->|Served via /api/v2/stream/proxy| Client
-
-    NetMirror -->|All variants exhausted STREAM_INVALID → fallback| Peachify
-    Peachify -->|Blocked IP → CF Worker retry| CFWorker[(streamhub-proxy CF Worker)]
-    Peachify -->|All fail → embed fallback| EmbedFallback[(peachify.top / vidsrc.to / autoembed.cc / embed.su)]
+    Server --> Controllers[API Controllers - thin routing pass-through]
+    Controllers --> Manager[Provider Manager - core pipeline service]
+    Manager --> Peachify[Peachify Provider - src/providers/peachify]
+    
+    Peachify -->|Scrape Request| Scraper[utils.peachifyGet - Resilient Proxy Router]
+    Scraper -->|1. Webshare Proxy Pool| Webshare[10 rotated proxies with 5-min cooldowns]
+    Scraper -->|2. Direct Request Fallback| Direct[Truly direct request from server IP]
+    Scraper -->|3. Cloudflare Worker Retry| CFWorker[https://streamhub-proxy.1545zoya.workers.dev]
+    
+    CFWorker & Webshare & Direct -->|Query Engines| ScraperEngines[(eat-peach.sbs Scrapers: Iron / Spider / Wolf / Multi / Dark)]
+    ScraperEngines -->|AES-GCM encrypted data| Parser[parser.dD - Decrypt with static keyHex]
+    
+    Parser -->|Decrypted direct URLs| Manager
+    Manager -->|Wrap qualities in secure token| Server
+    Server -->|Proxied HLS/MP4 & decrypted embeds| Client
 ```
 
-### Key Components
-
-1. **Express Server & Router** (`src/app/` & `src/routes/`): Gateway enforcing request validation, CORS proxying, and streaming data piping.
-2. **Provider Registry** (`src/provider-registry/`): Discovers concrete sub-providers dynamically at startup by scanning `src/providers/`.
-3. **Provider Manager** (`src/provider-manager/`): **The only place that decides provider selection.** Runs sequential pipelines for stream, details, and download. Implements deterministic priority ordering, variant retry, and structured error classification.
-4. **BaseProvider Contract** (`src/providers/BaseProvider.js`): Abstract class defining the required interface for `search`, `details`, `stream`, `download`, and `health`.
-5. **Concrete Providers**:
-   * **NetMirror** (`src/providers/netmirror/`): Translates requests into `net27.cc` API calls. Builds a priority-ordered variant queue (Tamil → Hindi → English → default → rest) capped at a maximum of 5 candidates to prevent connection lag and rate limits, and retries CDN validation. If a 429 Rate Limit is encountered, it aborts immediately. CDN tokens are IP-signed for the **backend server's IP**.
-   * **Peachify** (`src/providers/peachify/`): Fetches & AES-GCM-decrypts encrypted payloads from `eat-peach.sbs`. Supports optional outbound residential proxy routing via `PROXY_URL`. Falls back to Cloudflare Worker proxy. If all scraping fails, returns an iframe embed fallback. **Peachify is embed-only and never handles download requests.**
+### Active Directory Folder Structure
+```
+moviezon-backend/
+├── src/
+│   ├── app/                      # Express app configurations & CORS setup
+│   ├── cache/                    # Memory cache service (node-cache wrapper)
+│   ├── config/                   # Global configuration parameters
+│   ├── controllers/              # Request handlers (apiController.js, historyController.js)
+│   ├── logger/                   # Winston logger utility
+│   ├── routes/                   # API routes definition (api.js)
+│   ├── server.js                 # HTTP server runner and process lifecycles
+│   ├── services/                 # Core backend business logic
+│   │   ├── player/               # Token encryption, decryption, HLS rewriting, and stream proxying
+│   │   ├── provider-manager/     # Unified details, stream, and download resolution pipelines
+│   │   └── tmdb/                 # TMDB discovery and normalization wrapper
+│   ├── providers/                # Scraping providers
+│   │   ├── BaseProvider.js       # Abstract base class enforcing provider contracts
+│   │   └── peachify/             # Core Peachify scraper provider
+│   │       ├── index.js          # Provider implementation class
+│   │       ├── parser.js         # AES-GCM data decryptor helper
+│   │       ├── player.js         # Embed & fallback URL constructor
+│   │       └── utils.js          # Proxy rotation, cooldowns, and fetch helper
+│   └── utils/                    # Data normalizer helpers (normalizer.js)
+```
 
 ---
 
 ## 🔄 Core Lifecycles & Flows
 
-### 1. Catalog Search Flow
-
-When a user searches for a movie or TV show, queries go to TMDB first. If TMDB returns empty or fails, the backend falls back to the in-memory local catalog built from NetMirror capture indices.
+### 1. Unified Search Flow
+When a user searches for a movie or TV show, queries go to TMDB first. If TMDB returns empty, the backend falls back to query the in-memory search method of registered providers.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    Client->>Express Server: GET /api/search?q=Karuppu
-    Express Server->>Controllers: Controllers.search("Karuppu")
-
+    Client->>Server: GET /api/v2/search?q=Swapped
+    Server->>Controllers: Controllers.search("Swapped")
+    
     rect rgb(20, 20, 30)
         Note over Controllers: Phase 1: TMDB Query
-        Controllers->>TMDB API: GET /search/multi?query=Karuppu
+        Controllers->>TMDB API: GET /search/multi?query=Swapped
         alt TMDB Success
-            TMDB API-->>Controllers: Return catalog array
-        else TMDB Failure / Empty
-            Controllers->>Provider Manager: Manager.search("Karuppu")
-            Provider Manager->>Cache Service: Cache GET (search:karuppu)
+            TMDB API-->>Controllers: Return normalized catalog array
+        else TMDB Empty / Failure
+            Controllers->>Provider Manager: Manager.search("Swapped")
+            Provider Manager->>Cache Service: Cache GET (search:swapped)
             alt Cache Hit
                 Cache Service-->>Provider Manager: Return Cached Results
             else Cache Miss
-                Provider Manager->>NetMirror: NetMirror.search("Karuppu")
-                Note over NetMirror: Search local catalog in-memory db (262 titles)
-                NetMirror-->>Provider Manager: Return local matches
-                Provider Manager->>Cache Service: Cache SET (search:karuppu, TTL: 600s)
+                Provider Manager->>Peachify: Peachify.search("Swapped")
+                Peachify-->>Provider Manager: [] (not directly supported by Peachify)
             end
             Provider Manager-->>Controllers: Return matches
         end
     end
-
-    Controllers-->>Client: 200 OK (Normalized MovieZon JSON)
+    
+    Controllers-->>Client: 200 OK (Standard normalized Catalog JSON)
 ```
 
 ---
 
-### 2. Details Pipeline — Sequential Availability Check
-
-> [!IMPORTANT]
-> The Details endpoint runs a **Phase 2 sequential availability check** to determine `defaultProvider` and `sources`. It calls `provider.stream()` to test availability — but the result is **only used for status flags**, never for CDN URL resolution. Raw CDN URLs are never included in the Details response. This guarantees the Details endpoint never exposes short-lived signed tokens to the frontend.
+### 2. Unified Details & Availability Flow
+The details pipeline resolves rich TMDB metadata and executes a quick check on Peachify to determine playback stream and download availability.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Frontend Client
-    participant Server as Backend API
-    participant Manager as Provider Manager
-    participant TMDB as TMDB API
-    participant NM as NetMirror
-    participant PC as Peachify
-
-    Client->>Server: GET /api/v2/details/tmdb/1367220?type=movie
-    Server->>Manager: Manager.resolveDetails(1367220, movie)
-
+    Client->>Server: GET /api/v2/details/tmdb/1007757?type=movie
+    Server->>Manager: Manager.resolveDetails(1007757, movie)
+    
     rect rgb(20, 20, 30)
-        Note over Manager: Phase 1 — TMDB Metadata Fetch
-        Manager->>TMDB: GET /movie/1367220 + /credits + /videos
-        TMDB-->>Manager: title, cast, poster, trailers
+        Note over Manager: Phase 1 — Metadata Resolution
+        Manager->>TMDB Service: fetchDetails(1007757, movie)
+        TMDB Service-->>Manager: Returns rich details (title, genres, cast, rating)
     end
-
+    
     rect rgb(10, 30, 10)
-        Note over Manager: Phase 2 — Sequential Availability Check (NOT parallel)
-        Note over Manager: Check NetMirror stream cache first
-        alt Stream cached for NetMirror
-            Manager->>Manager: Mark NetMirror available=true (no network call)
-        else Cache miss
-            Manager->>NM: NetMirror.stream(1367220) with timeout
-            alt NetMirror stream valid
-                NM-->>Manager: available=true (status only, no CDN URL in sources)
-            else NetMirror stream invalid / timeout
-                NM-->>Manager: available=false
-            end
-        end
-
-        Note over Manager: Then check Peachify (sequential, after NetMirror)
-        alt Stream cached for Peachify
-            Manager->>Manager: Mark Peachify available=true (no network call)
-        else Cache miss
-            Manager->>PC: Peachify.stream(1367220) with timeout
-            PC-->>Manager: available=true/false
-        end
+        Note over Manager: Phase 2 — Stream & Download Availability Check
+        Manager->>Peachify: Peachify.stream(1007757, movie)
+        Peachify-->>Manager: Returns Embed & Fallback player URLs
+        Note over Manager: Confirm stream availability (isPlayable=true)
     end
-
-    Note over Manager: defaultProvider = first available in priority order
-    Manager-->>Server: Details + sources[] (availability status only)
-    Server-->>Client: 200 OK (title, cast, sources[], defaultProvider)
+    
+    Manager-->>Server: Combined details + player metadata + download availability
+    Server-->>Client: 200 OK (Normalized results including sources, player and download nodes)
 ```
-
-**Example sources[] in Details response:**
-```json
-"sources": [
-  { "provider": "netmirror", "id": "1367220", "available": false },
-  { "provider": "peachify",  "id": "1367220", "available": true  }
-],
-"defaultProvider": "peachify"
-```
-
-> [!NOTE]
-> `defaultProvider: "peachify"` here is **correct** — it means NetMirror's CDN tokens are currently expired for this title. The pipeline correctly identifies Peachify as the highest-priority **available** provider. When NetMirror tokens are fresh, `defaultProvider: "netmirror"`.
 
 ---
 
-### 3. NetMirror Stream Flow — Variant Retry Loop
-
-> [!IMPORTANT]
-> 1. A CDN `403` on one variant's signed URL does **NOT** mean NetMirror is offline. It means that specific variant's token is invalid for this IP/timestamp. NetMirror builds a priority queue of language variants, **caps it at a maximum of 5 candidates**, and retries each one before failing. Only after all variants in the capped queue are exhausted does it throw `STREAM_INVALID`.
-> 2. If `net27.cc` returns an HTTP `429` (Rate Limited) during any step (fetching variants or direct embed data), the provider **immediately aborts** and propagates the error rather than trying other variants or worker proxy fallbacks.
+### 3. Playback Stream Flow (`resolveStream`)
+For playing media content, Peachify resolves an iframe-embed player endpoint or returns alternative auto-embed servers.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Frontend Client
-    participant Server as Backend API
-    participant Manager as Provider Manager
-    participant NM as NetMirror Provider
-    participant NM_API as net27.cc API
-    participant CDN as hakunaymatata.com CDN
-
-    Client->>Server: GET /api/v2/stream/tmdb/1367220?type=movie
-    Note over Server: clientIp = null (always server IP for token signing)
-    Server->>Manager: Manager.resolveStream(1367220, movie)
-
-    Manager->>NM_API: GET /api/variants-tmdb/movie/1367220
-    NM_API-->>Manager: Language variant list [Tamil, Hindi, English, ...]
-
-    Note over Manager: Build priority queue (capped to max 5 candidates)
-
-    loop For each variant in capped queue (max 5)
-        Manager->>NM_API: GET /api/embed-tmdb/1367220?dub=<variantId>
-        alt HTTP 429 Rate Limit
-            Note over Manager: Throw immediately (abort loop & resolution)
-        else HTTP 200 OK
-            NM_API-->>Manager: CDN URLs signed for Render server IP
-        end
-
-        alt Token expiring soon (< 60s buffer)
-            Note over Manager: Skip variant → try next
-        else Token fresh
-            Manager->>CDN: GET hakunaymatata.com/...?sign=xxx (direct, no CF Worker)
-            alt CDN returns 200/206
-                CDN-->>Manager: OK — this variant is playable
-                Note over Manager: Return this variant immediately
-            else CDN returns 403
-                Note over Manager: cdn_403 — try next variant in queue
-            end
-        end
+    Client->>Server: GET /api/v2/stream/tmdb/1007757?type=movie
+    Server->>Manager: Manager.resolveStream(1007757, movie, season=1, episode=1)
+    
+    Manager->>Cache Service: Cache GET (pipeline:movie:1007757:1:1:default)
+    alt Cache Hit
+        Cache Service-->>Manager: Return cached streams and embed details
+    else Cache Miss
+        Manager->>Peachify: Peachify.stream(1007757, movie, 1, 1)
+        Note over Peachify: Construct iframe URL and embed fallbacks (vidsrc, autoembed, embed.su)
+        Peachify-->>Manager: Normalized stream object (streamType='embed')
+        Manager->>Cache Service: Cache SET (pipeline:..., TTL: 1800s)
     end
-
-    alt Any variant playable
-        Manager-->>Server: Stream data (qualities, subtitles, variants list)
-        Note over Server: Wrap all CDN URLs in /api/v2/stream/proxy
-        Server-->>Client: JSON with proxied stream URLs + selectedProvider=netmirror
-    else All variants exhausted
-        Manager-->>Manager: throw STREAM_INVALID (err.code='STREAM_INVALID')
-        Note over Manager: Pipeline continues to Peachify
-    end
-```
-
-**Variant failure log pattern:**
-```
-[NetMirror] Variant queue for ID 1367220: [v1, v2, v3] (3 candidates)
-[NetMirror] Trying v1... CDN returned 403. Trying next variant...
-[NetMirror] Trying v2... CDN URL verified OK (Status: 206).
-[NetMirror] Variant v2 is playable for ID 1367220.
-[Pipeline] ✓ RESOLVED via Netmirror in 4231ms
+    
+    Manager-->>Server: Playback stream specifications
+    Server-->>Client: 200 OK (JSON specifying provider=peachify, streamType=embed, embedUrl)
 ```
 
 ---
 
-### 4. Backend Pipeline Stream Flow — resolveStream
-
-> [!IMPORTANT]
-> This is the **primary stream endpoint** the frontend must use. The backend decides provider — the frontend never selects NetMirror vs Peachify.
-
-```mermaid
-flowchart TD
-    A["Client: GET /api/v2/stream/tmdb/:tmdbId?type=movie"] --> B["Manager.resolveStream()"]
-    B --> C{"Pipeline cache\\nhit?"}
-    C -->|Yes - TTL 1800s| D["Return cached result"]
-    C -->|No| E["Sequential for...of loop over providers in priority order"]
-
-    E --> F["Provider 1: NetMirror.stream()"]
-    F --> G{"Build variant queue\\n(Capped to max 5 candidates)"}
-    G --> H["For each variant: fetch embed (abort on 429) → check expiry → check CDN"]
-    H -->|"Any variant CDN 200"| I["✅ RESOLVED via NetMirror\\nselectedProvider=netmirror"]
-    H -->|"All variants CDN 403"| J["throw STREAM_INVALID\\nerr.code='STREAM_INVALID'"]
-    H -->|"HTTP 429 Rate Limit"| JA["throw 429 error\\n(immediate abort)"]
-
-    J --> K["Provider 2: Peachify.stream()"]
-    K --> L{"Direct stream\\nresolved?"}
-    L -->|"Yes - AES-GCM decrypt OK"| M["✅ RESOLVED via Peachify\\nselectedProvider=peachify"]
-    L -->|"All scrapers blocked"| N["Embed fallback\\nstreamType='embed'"]
-
-    I --> O["Cache SET pipeline:movie:1367220:1:1 TTL=1800s"]
-    M --> O
-    N --> O
-    O --> P["Wrap CDN URLs in /api/v2/stream/proxy"]
-    P --> Q["Return to client"]
-```
-
----
-
-### 5. Download Pipeline — resolveDownload
-
-> [!IMPORTANT]
-> The frontend **never** selects a provider for downloads. It calls `GET /api/v2/download/tmdb/:tmdbId` and the backend pipeline decides the provider. Peachify is embed-only and is automatically skipped.
-
-```mermaid
-flowchart TD
-    A["Client: GET /api/v2/download/tmdb/:tmdbId?type=movie"] --> B["apiController.resolveDownload()"]
-    B --> C["Manager.resolveDownload()"]
-    C --> D["Sequential for...of over providers in priority order"]
-
-    D --> E["Provider 1: NetMirror.download()"]
-    E --> F{"Direct MP4/HLS\\nqualities returned?"}
-    F -->|"Yes"| G["✅ RESOLVED via NetMirror"]
-    F -->|"No / throw"| H["Provider 2: Peachify.download()"]
-
-    H --> I{"Peachify supports\\ndirect download?"}
-    I -->|"No - embed-only"| J["throw — Peachify skipped"]
-    I -->|"Yes - future support"| K["✅ RESOLVED via Peachify"]
-
-    J --> L["available=false — 404 to client"]
-    G --> M["Wrap download URLs in /api/v2/stream/proxy?download=true"]
-    K --> M
-    M --> N["Return qualities[] to client"]
-```
-
----
-
-### 6. Peachify Scraper & Stream Flow
-
-Peachify resolves direct streams by fetching and AES-GCM-decrypting encrypted payloads from 5 `eat-peach.sbs` scraper APIs. If the direct scraper request fails (blocked datacenter IP), Peachify retries via a Cloudflare Worker proxy.
+### 4. Download Resolution Flow (`resolveDownload`)
+For direct downloading, Peachify scrapes the encrypted endpoints of the 5 scraper engines and decrypts their sources to retrieve HLS or MP4 streams.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Frontend Client
-    participant Server as Backend API
-    participant Peachify as Peachify Provider
-    participant CFProxy as CF Worker (streamhub-proxy)
-    participant ScraperAPI as eat-peach.sbs
-    participant WorkerCDN as Peachify CDN Workers
-
-    Client->>Server: GET /api/v2/stream/tmdb/1367220 (NetMirror exhausted, pipeline continues)
-    Server->>Peachify: Peachify.stream(1367220)
-
-    loop Loop over 5 scrapers (Iron/Spider/Wolf/Multi/Dark)
-        Peachify->>ScraperAPI: Direct Axios GET /moviebox/movie/1367220
-        alt Direct Request OK
-            ScraperAPI-->>Peachify: Encrypted Payload (isEncrypted: true)
-        else 403 Blocked (Render datacenter IP)
-            Note over Peachify: Retry via CF Worker with forwarded headers
-            Peachify->>CFProxy: GET /?url=...eat-peach.sbs...&headers={"Referer":"https://peachify.top/"}
-            CFProxy->>ScraperAPI: GET /movie/1367220 (with forwarded headers)
-            alt CF Worker Retry OK
-                CFProxy-->>Peachify: Encrypted Payload ✅
-            else CF Worker Also Fails
-                Note over Peachify: Try next scraper
-            end
-        end
-
-        Note over Peachify: AES-GCM decrypt with keyHex
-        Note over Peachify: Extract MP4/HLS sources + subtitles
+    Client->>Server: GET /api/v2/download/tmdb/1007757?type=movie
+    Server->>Manager: Manager.resolveDownload(1007757, movie)
+    
+    Manager->>Peachify: Peachify.download(1007757, movie, 1, 1)
+    
+    rect rgb(15, 15, 25)
+        Note over Peachify: _scrapeDirectStream()
+        Peachify->>Peachify: Query Engines (Iron/Spider/Wolf/Multi/Dark) via utils.peachifyGet()
+        Note over Peachify: Decrypt payloads using AES-GCM (keyHex)
+        Note over Peachify: Extract qualities and stream headers
     end
-
-    alt Direct Streams Resolved
-        Peachify-->>Server: Return native streams (MP4 per quality)
-        Note over Server: Wrap all URLs in /api/v2/stream/proxy
-        Server-->>Client: JSON with proxied quality URLs + selectedProvider=peachify
-    else All Scrapers Failed / Blocked
-        Note over Peachify: Construct embed fallback URLs
-        Peachify-->>Server: streamType='embed', embedUrl='https://peachify.top/embed/movie/1367220'
-        Server-->>Client: JSON with embed settings (render in iframe)
+    
+    Peachify-->>Manager: Returns raw qualities array (MP4/HLS URLs + headers)
+    
+    rect rgb(30, 20, 20)
+        Note over Manager: Secure Link Generation (apiController)
+        Manager->>Player Service: encryptToken({url, headers, filename})
+        Player Service-->>Manager: secureToken String
     end
+    
+    Manager-->>Server: Qualities array with proxied & tokenized URLs
+    Server-->>Client: 200 OK (JSON with tokenized download URLs)
 ```
 
 ---
 
-## 💾 Failover & Fallback Layers
+### 5. Resilient Scraper Request Flow (`peachifyGet`)
+To bypass Cloudflare IP bans and request rate limitations, outbound scraper requests are managed using a tiered proxy routing process:
 
-### NetMirror Fallback Matrix
-
-| Layer | Trigger | Action |
-|-------|---------|--------|
-| **1. Live Variants API** | Always tried first | `GET net27.cc/api/variants-tmdb/movie/:id` |
-| **2. CF Worker (variants)** | Live variants API network error | Retry via `streamhub-proxy.1545zoya.workers.dev` |
-| **3. Capture File** | Live API empty/blocked | Serve from `net27.cc-capture.json` (88 dynamic variant mappings indexed) |
-| **4. Variant Priority Queue** | Variants available | Build queue: user-specified → Tamil → Hindi → English → defaultSubjectId → rest; **capped to max 5 candidates** |
-| **5. HTTP 429 Check** | Rate limit encountered on `net27.cc` | Immediately throw and abort request (bypass proxies and other variants) |
-| **6. Token Expiry Check** | Per variant (cheap, no network) | Skip variant if `expires - now < 60s`; try next |
-| **7. CDN Check (per variant)** | Per variant (direct fetch, no proxy) | `GET hakunaymatata.com` from Render IP; `403` → try next variant |
-| **8. STREAM_INVALID** | All variants CDN 403 | Throw `err.code='STREAM_INVALID'` — ProviderManager tries Peachify |
-| **9. Direct Embed (no variants)** | `variants[]` is empty (e.g. some titles) | `GET /api/embed-tmdb` without variant ID |
-| **10. Local DB Search** | NetMirror search offline | In-memory catalog from capture (262 titles) |
-
-### Peachify Fallback Matrix
-
-| Layer | Trigger | Action |
-|-------|---------|--------|
-| **1. Direct Request** | Always tried first | `axios.get(eat-peach.sbs/...)` with browser headers |
-| **2. CF Worker + Headers** | Direct returns 403 | Retry via `streamhub-proxy` with `headers=` query param encoding `Referer`, `Origin`, `User-Agent` |
-| **3. Next Scraper** | Both fail | Loop to next of 5 scrapers: Iron → Spider → Wolf → Multi → Dark |
-| **4. Embed Fallback** | All 5 scrapers fail | Return `streamType: 'embed'` with `peachify.top`, `vidsrc.to`, `autoembed.cc`, `embed.su` URLs |
-
-> [!NOTE]
-> Peachify **never handles download requests**. It is embed-only. `resolveDownload()` skips Peachify automatically.
-
-### Error Classification
-
-| Error Code | Meaning | ProviderManager Action |
-|---|---|---|
-| *(no code — network)* | Provider offline (ECONNREFUSED, 503, DNS fail) | Log `PROVIDER_OFFLINE`, try next provider |
-| `STREAM_INVALID` | All CDN variants returned 403 — provider catalog works, tokens invalid | Log `STREAM_INVALID`, try next provider |
-| `EMBED_ONLY` | Provider returns embed URL, no direct stream | Accept embed if no direct stream available |
+```mermaid
+flowchart TD
+    Start["Call peachifyGet(url, options)"] --> TestCheck{"isTestEnv == true?"}
+    
+    TestCheck -->|Yes - Skip Proxies| DirectReq["Truly Direct Request (Server IP)"]
+    TestCheck -->|No| Candidates["Assemble candidate proxies:\n1 Primary (PROXY_URL) + 10 Fallbacks (Webshare)"]
+    
+    Candidates --> Filter["Filter proxies not on 5-min cooldown"]
+    Filter --> HasProxy{"Any proxies available?"}
+    
+    HasProxy -->|Yes| LoopProxies["Try request through next available proxy"]
+    HasProxy -->|No| DirectReq
+    
+    LoopProxies --> ProxySuccess{"Request succeeded?"}
+    ProxySuccess -->|Yes| ReturnSuccess["Return Axios Response"]
+    ProxySuccess -->|No - Error 402/407 or Timeout| Cooldown["Put proxy on 5-min cooldown Map"] --> NextProxy{"More proxies to try?"}
+    
+    NextProxy -->|Yes| LoopProxies
+    NextProxy -->|No| DirectReq
+    
+    DirectReq --> DirectSuccess{"Request succeeded?"}
+    DirectSuccess -->|Yes| ReturnSuccess
+    DirectSuccess -->|No| WorkerFallback["Retry via Cloudflare Worker Proxy\n(streamhub-proxy.1545zoya.workers.dev)"]
+    
+    WorkerFallback --> WorkerSuccess{"Request succeeded?"}
+    WorkerSuccess -->|Yes| ReturnSuccess
+    WorkerSuccess -->|No| ThrowError["Throw last encountered exception"]
+```
 
 ---
 
-## ⚡ Caching Strategy
+## 💾 Resilient Proxy & Fallback Matrix
 
-MovieZon uses an in-memory Node-Cache system with TTL rules:
+Peachify uses a multi-tier proxy pipeline to maintain scraping continuity in cloud environments (like Render) which frequently have blocked datacenter IPs.
 
-| Cache Type | TTL | Key Pattern |
-|-----------|-----|-------------|
-| **Search** | 600s (10 min) | `search:{query}` |
-| **Details** | 3600s (1 hour) | `details:{provider}:{type}:{id}` |
-| **Stream** | 1800s (30 min) | `stream:{provider}:{type}:{id}:{se}:{ep}:{variant}:{ip}` |
-| **Pipeline** | 1800s (30 min) | `pipeline:{type}:{tmdbId}:{se}:{ep}` |
+| Layer | Type | Mechanism | Cooldown / Failover |
+| :--- | :--- | :--- | :--- |
+| **1. Primary Proxy** | HTTP / HTTPS | Custom residential proxy loaded from `PROXY_URL` environment variable. | Fails over to the fallback pool if not configured or down. |
+| **2. Fallback Pool** | Rotated HTTP | 10 static proxies from Webshare dashboard loaded at startup. | Any status `402` (Payment Required), `407` (Proxy Auth), or network error (ECONNRESET, ETIMEDOUT, ECONNREFUSED) places that proxy on a **5-minute cooldown**. |
+| **3. Truly Direct** | Direct IP | The Render server issues a request directly. | Used only if all configured proxies fail or are on cooldown. |
+| **4. Cloudflare Worker** | Gateway Proxy | Request routed via Cloudflare Worker `streamhub-proxy.1545zoya.workers.dev` with encrypted/encoded Referer, Origin, and User-Agent query params. | Used as a final retry. If this worker also fails, the provider throws a final scraping exception. |
+| **5. Embed Fallbacks** | Client Player | If all scraping fails, returns `streamType: 'embed'` referencing public embed endpoints (`peachify.top`, `vidsrc.to`, `autoembed.cc`, `embed.su`). | Handled gracefully in frontend components inside an `iframe`. |
 
-> [!IMPORTANT]
-> **Stream Cache & Variant Retry**: The Phase 2 availability check in `resolveDetails()` reads from the stream cache **first** — if a stream for a provider is cached, no network call is made and the provider is marked available. This makes the Details endpoint fast after the first `resolveStream()` call warms the cache.
+---
 
-> [!NOTE]
-> The pipeline cache key (`pipeline:movie:1367220:1:1`) stores the full result of `resolveStream()` including `selectedProvider`. On cache hit, the entire pipeline is bypassed.
+## 🔒 Security & Stream Proxy Pipeline
+
+To protect the server, enforce CORS, bypass IP blocks, and parse chunked contents, the backend runs a stream proxy at `/api/v2/stream/proxy`.
+
+### 1. Download Token Encryption (`playerService.encryptToken`)
+Download URLs are protected from tampering and IP leakages by wrapping them in secure, temporary state tokens:
+* **Algorithm:** `AES-256-CBC`
+* **Encryption Key:** Automatically generated at server startup (`PROXY_TOKEN_SECRET`).
+* **Payload:** Contains target CDN URL, custom download request headers, and custom formatted target filename (e.g. `Swapped_S1E1_1080p.mp4`).
+* **Route:** `/api/v2/stream/proxy?token={iv:encryptedData}&download=true`
+
+### 2. Live HLS (.m3u8) Playlist Rewriting
+When an HLS stream (`.m3u8` playlist) is played through the proxy, the proxy fetches the playlist file, rewrites it line-by-line, and returns the modified string:
+* **Media Segments & Keys:** Any segment URLs or alternate encryption keys (lines starting with `#EXT-X-KEY` or uri segments) are converted to route back through the stream proxy.
+* **Alternate Tracks:** Alternate audio streams (e.g., multilingual track listings) and subtitle tracks defined in `#EXT-X-MEDIA:TYPE=AUDIO` or `TYPE=SUBTITLES` are rewritten dynamically to point to the proxy endpoint, preserving custom headers.
+
+---
+
+## 💾 Caching Strategy
+
+MovieZon uses an in-memory `node-cache` service to minimize outbound API fetches, lower TMDB quota rates, and ensure fast details lookups.
+
+| Cache Type | TTL (Seconds) | Key Pattern | Purpose |
+| :--- | :--- | :--- | :--- |
+| **Search** | 600s (10 min) | `search:{query}` | Caches TMDB search queries and catalog results. |
+| **Details** | 1800s (30 min) | `details:resolved:{type}:{tmdbId}` | Stores TMDB metadata combined with verified Peachify availability. |
+| **Stream (Explicit)** | 1800s (30 min) | `stream:{provider}:{type}:{id}:{se}:{ep}:{variant}:{ip}` | Caches explicit stream results. |
+| **Pipeline Stream** | 1800s (30 min) | `pipeline:{type}:{tmdbId}:{se}:{ep}:{variantId}` | Caches stream requests resolved by the sequential pipeline. |
 
 ---
 
 ## 🌐 API Endpoint Reference
 
-### 1. Unified Search
-`GET /api/search?q={query}`
+### 1. Search Catalog
 `GET /api/v2/search?q={query}`
 
-**Query Parameters:**
-* `q` (string, required): Search query.
-
-**Example Response:**
+**Response Schema:**
 ```json
 {
   "ok": true,
@@ -404,106 +274,105 @@ MovieZon uses an in-memory Node-Cache system with TTL rules:
   "count": 1,
   "items": [
     {
-      "id": "1367220",
-      "provider": "netmirror",
-      "tmdbId": 1367220,
-      "title": "Karuppu",
-      "originalTitle": "Karuppu",
-      "year": 2026,
+      "id": "1007757",
+      "provider": "tmdb",
+      "tmdbId": 1007757,
+      "title": "Swapped",
+      "originalTitle": "Swapped",
+      "year": 2025,
       "type": "movie",
-      "language": "ta",
-      "quality": "1080p",
-      "poster": "https://image.tmdb.org/t/p/w185/...",
+      "rating": 7.3,
+      "poster": "https://image.tmdb.org/t/p/w342/...",
+      "backdrop": "https://image.tmdb.org/t/p/w780/...",
       "overview": "...",
-      "rating": "TMDB 7.1",
-      "providers": ["netmirror"]
+      "language": "en"
     }
-  ]
+  ],
+  "results": [...]
 }
 ```
 
 ---
 
-### 2. Title Details (Unified Metadata & Sequential Availability)
-`GET /api/v2/details/tmdb/:id?type={movie|tv}&season={se}&episode={ep}`
+### 2. Unified Details
+`GET /api/v2/details/tmdb/:id?type={movie|tv}`
 
-Fetches rich TMDB metadata and runs a **sequential** availability check across all providers. Returns availability status — **never raw CDN URLs**.
+Fetches TMDB metadata and combines it with a quick check on Peachify to verify streaming and download availability.
 
-**Example Response:**
+**Response Schema:**
 ```json
 {
   "ok": true,
   "success": true,
-  "movie": {
-    "id": "1367220",
-    "provider": "tmdb",
-    "tmdbId": 1367220,
-    "title": "Karuppu",
+  "results": {
+    "id": "1007757",
+    "provider": "peachify",
+    "providerId": null,
+    "tmdbId": 1007757,
+    "title": "Swapped",
+    "originalTitle": "Swapped",
     "overview": "...",
     "poster": "https://image.tmdb.org/t/p/w500/...",
-    "year": "2026",
-    "rating": "TMDB 7.1",
-    "genres": ["Action", "Thriller"],
-    "cast": [{ "name": "Actor Name", "character": "Role", "profilePath": "..." }],
+    "backdrop": "https://image.tmdb.org/t/p/original/...",
+    "year": "2025",
+    "rating": "TMDB 7.3",
+    "genres": ["Comedy", "Sci-Fi"],
+    "genre": "Comedy, Sci-Fi",
+    "duration": 94,
+    "language": "en",
+    "cast": [
+      {
+        "name": "Actor Name",
+        "character": "Main Character",
+        "profilePath": "..."
+      }
+    ],
+    "director": "Director Name",
+    "trailer": "https://www.youtube.com/watch?v=...",
+    "seasons": [],
+    "recommendations": [],
     "sources": [
-      { "provider": "netmirror", "id": "1367220", "available": false },
-      { "provider": "peachify",  "id": "1367220", "available": true  }
+      {
+        "provider": "peachify",
+        "id": "1007757",
+        "serverIndex": 1,
+        "available": true,
+        "downloadSupported": true,
+        "languages": ["English"],
+        "streamType": "embed",
+        "embedUrl": "https://peachify.top/embed/movie/1007757",
+        "embedFallbacks": ["vidsrc", "autoembed", "embed.su"],
+        "variants": []
+      }
     ],
     "defaultProvider": "peachify",
-    "variants": [
-      { "id": "799599864534515856", "language": "Tamil Dubbed" },
-      { "id": "1367220", "language": "Original Audio" }
-    ]
+    "supportedAudio": ["English"],
+    "supportedSubtitles": [],
+    "supportedQualities": [],
+    "downloadAvailable": true,
+    "player": {
+      "provider": "peachify",
+      "type": "iframe",
+      "available": true,
+      "embedUrl": "https://peachify.top/embed/movie/1007757",
+      "embedFallbacks": ["vidsrc", "autoembed", "embed.su"]
+    },
+    "download": {
+      "available": true,
+      "qualities": []
+    }
   }
 }
 ```
-
-> [!NOTE]
-> `sources[].available` is a **status flag only**. No CDN URLs are included. The frontend uses `defaultProvider` to know which server to auto-select for the Watch Now button.
 
 ---
 
-### 3. Backend Pipeline Stream (Recommended — frontend uses this)
-`GET /api/v2/stream/tmdb/:tmdbId?type={movie|tv}&season={1}&episode={1}&variant={variantId}`
+### 3. Resolve Stream
+`GET /api/v2/stream/tmdb/:tmdbId?type={movie|tv}&season={se}&episode={ep}`
 
-**The backend decides the provider.** The pipeline tries NetMirror (with full variant retry) first, then Peachify. The frontend never picks a provider.
+Checks cached configurations or constructs the details for Peachify's iframe player.
 
-**Path Parameters:**
-* `:tmdbId` (number): TMDB movie/show ID.
-
-**Query Parameters:**
-* `type` (string, required): `movie` or `tv`.
-* `season` (number, optional): TV season (default: `1`).
-* `episode` (number, optional): TV episode (default: `1`).
-* `variant` (string, optional): Specific dub variant ID (NetMirror).
-
-**Example Response — NetMirror resolved:**
-```json
-{
-  "ok": true,
-  "success": true,
-  "available": true,
-  "provider": "netmirror",
-  "selectedProvider": "netmirror",
-  "fallbackTriggered": false,
-  "streams": [
-    { "quality": "360p",  "url": "https://backend.onrender.com/api/v2/stream/proxy?url=..." },
-    { "quality": "1080p", "url": "https://backend.onrender.com/api/v2/stream/proxy?url=..." }
-  ],
-  "subtitles": [
-    { "lang": "en", "name": "English", "url": "..." }
-  ],
-  "stream": {
-    "variants": [
-      { "id": "1367220", "language": "Original Audio" },
-      { "id": "799599864534515856", "language": "Tamil Dubbed" }
-    ],
-    "expires": 1781940000
-  }
-}
-```
-
-**Example Response — Peachify fallback (NetMirror all variants CDN 403):**
+**Response Schema:**
 ```json
 {
   "ok": true,
@@ -511,186 +380,54 @@ Fetches rich TMDB metadata and runs a **sequential** availability check across a
   "available": true,
   "provider": "peachify",
   "selectedProvider": "peachify",
-  "fallbackTriggered": true,
-  "streams": [],
+  "fallbackTriggered": false,
+  "subjectId": "1007757",
   "streamType": "embed",
-  "embedUrl": "https://peachify.top/embed/movie/1367220"
-}
-```
-
----
-
-### 4. Explicit Provider Stream (Manual server switching only)
-`GET /api/v2/stream/:provider/:id?type={movie|tv}&season={1}&episode={1}`
-
-> [!WARNING]
-> Use this endpoint **only** when the user manually selects a server (e.g. "Switch to Server 2"). For all auto-play scenarios, use `/api/v2/stream/tmdb/:tmdbId` above. The frontend must never use this endpoint to implement provider-selection logic.
-
-**Path Parameters:**
-* `:provider` (string): `netmirror` or `peachify`.
-* `:id` (string/number): Provider-specific content ID or TMDB ID.
-
----
-
-### 5. Backend Pipeline Download (Backend decides provider)
-`GET /api/v2/download/tmdb/:tmdbId?type={movie|tv}&season={1}&episode={1}&variant={variantId}`
-
-**The backend decides the provider for downloads.** NetMirror is always tried first. Peachify is embed-only and automatically skipped.
-
-**Path Parameters:**
-* `:tmdbId` (number): TMDB movie/show ID.
-
-**Query Parameters:**
-* `type` (string, required): `movie` or `tv`.
-* `season` / `episode` (number, optional): For TV content.
-* `variant` (string, optional): Specific dub variant ID.
-
-**Example Response — Download available:**
-```json
-{
-  "ok": true,
-  "success": true,
-  "available": true,
-  "provider": "netmirror",
-  "selectedProvider": "netmirror",
-  "streams": [
-    {
-      "quality": "360p",
-      "url": "https://backend.onrender.com/api/v2/stream/proxy?url=...&download=true"
-    },
-    {
-      "quality": "1080p",
-      "url": "https://backend.onrender.com/api/v2/stream/proxy?url=...&download=true"
-    }
-  ]
-}
-```
-
-**Example Response — No provider available:**
-```json
-{
-  "ok": false,
-  "success": false,
-  "available": false,
-  "reason": "No provider supports download for this title",
-  "streams": []
-}
-```
-
----
-
-### 6. Stream Proxy (CORS, Referer & IP-Signing Bypass)
-`GET /api/v2/stream/proxy?url={url}&headers={headers}&download={true|false}`
-
-Proxies raw video binary streams to bypass CORS, Referer, and IP-restriction checks enforced by streaming CDNs.
-
-**Query Parameters:**
-* `url` (string, required): The target stream URL to proxy.
-* `headers` (string, optional): URL-encoded JSON string of extra headers to forward.
-* `download` (boolean, optional): If `true`, adds `Content-Disposition: attachment`.
-* `filename` (string, optional): Filename for download (defaults to `video.mp4`).
-
-**Key Proxy Logic:**
-
-| Rule | Condition | Action |
-|------|-----------|--------|
-| **Skip re-proxy** | URL already contains `/stream/proxy` or `/proxy-stream` | Return URL as-is |
-| **Extract nested URL** | URL wraps `eat-peach.sbs` / `peachify` proxy (`?url=...`) | Extract nested target URL |
-| **CF Worker redirection** | `hakunaymatata.com` URL (playback, not download/subtitle) | Redirect through `streamhub-proxy` to save backend bandwidth |
-| **Direct CDN fetch** | `hakunaymatata.com` URL + `download=true` or subtitle | Fetch directly from Render server (IP-signed token compatibility) |
-| **Strip worker headers** | URL contains `workers.dev` | Remove `Referer`, `Origin`, `User-Agent` |
-| **HLS rewriting** | URL ends in `.m3u8` or contains HLS paths | Fetch playlist, rewrite segment URLs and relative/absolute URI attributes inside comment lines (e.g., `#EXT-X-MEDIA` alternate audio tracks, `#EXT-X-KEY` keys) to route through this proxy |
-| **Range passthrough** | Client sends `Range: bytes=x-y` | Forward Range header; return `206 Partial Content` |
-
----
-
-### 7. Providers List
-`GET /api/providers`
-
-**Example Response:**
-```json
-{
-  "ok": true,
-  "providers": [
-    {
-      "name": "netmirror",
-      "displayName": "Netmirror",
-      "priority": 0,
-      "status": "healthy",
-      "message": "Reachable",
-      "responseTimeMs": 73,
-      "lastChecked": "2026-06-21T01:27:24.266Z"
-    },
-    {
-      "name": "peachify",
-      "displayName": "Peachify",
-      "priority": 2,
-      "status": "degraded",
-      "message": "Peachify unreachable: Request failed with status code 403",
-      "responseTimeMs": 123,
-      "lastChecked": "2026-06-21T01:27:24.316Z"
-    }
-  ]
-}
-```
-
-> [!NOTE]
-> Peachify health shows **degraded** on Render because `peachify.top` homepage is blocked from datacenter IPs. This does **not** affect stream resolution — direct streams are fetched from `eat-peach.sbs` via the CF Worker retry path.
-
----
-
-### 8. Health Check
-`GET /api/health`
-
-**Example Response:**
-```json
-{
-  "status": "ok",
-  "timestamp": "2026-06-21T07:10:00.000Z",
-  "uptime": "0h 10m 15s",
-  "memory": { "rss": "79 MB", "heapTotal": "17 MB", "heapUsed": "15 MB" },
-  "providers": {
-    "netmirror": { "status": "healthy", "responseTimeMs": 73 },
-    "peachify":  { "status": "degraded", "responseTimeMs": 123 }
+  "embedUrl": "https://peachify.top/embed/movie/1007757",
+  "embedFallbacks": ["https://vidsrc.to/embed/movie/1007757", "https://autoembed.cc/embed/movie/1007757", "https://embed.su/embed/movie/1007757"],
+  "streams": [],
+  "variants": [],
+  "selectedVariantId": null,
+  "stream": {
+    "provider": "peachify",
+    "drm": false,
+    "streamUrl": "",
+    "embedUrl": "https://peachify.top/embed/movie/1007757",
+    "embedFallbacks": [...],
+    "streamType": "embed",
+    "subtitles": [],
+    "headers": {},
+    "qualities": [],
+    "variants": [],
+    "expires": null
   }
 }
 ```
 
 ---
 
-### 9. TMDB Category Lists
-`GET /api/v2/tmdb/:category`
+### 4. Resolve Download
+`GET /api/v2/download/tmdb/:tmdbId?type={movie|tv}&season={se}&episode={ep}`
 
-Fetches trending, popular, top-rated, upcoming, or discover lists from TMDB, normalizes them, and returns standard catalog items.
+Triggers internal Peachify scraper engines (Iron/Spider/Wolf/Multi/Dark), decrypts source URLs, and returns token-encrypted proxied qualities.
 
-**Path Parameters:**
-* `:category` (string, required): One of `trending`, `popular`, `popular_tv`, `top_rated`, `upcoming`, `discover`.
-
-**Query Parameters:**
-* `media` (string, optional): For `trending` category (`all`, `movie`, `tv` - default: `all`).
-* `time` (string, optional): For `trending` category (`day`, `week` - default: `week`).
-* `type` (string, optional): For `top_rated` or `discover` categories (`movie`, `tv` - default: `movie`).
-* Any other query parameters (e.g. `page`, `with_genres`) are automatically forwarded to the TMDB API.
-
-**Example Response:**
+**Response Schema:**
 ```json
 {
   "ok": true,
   "success": true,
-  "results": [
+  "available": true,
+  "provider": "peachify",
+  "selectedProvider": "peachify",
+  "subjectId": "1007757",
+  "streams": [
     {
-      "id": "1367220",
-      "provider": "tmdb",
-      "tmdbId": 1367220,
-      "title": "Karuppu",
-      "originalTitle": "Karuppu",
-      "year": 2026,
-      "type": "movie",
-      "rating": 7.1,
-      "poster": "https://image.tmdb.org/t/p/w342/...",
-      "backdrop": "https://image.tmdb.org/t/p/w780/...",
-      "overview": "...",
-      "language": "ta"
+      "quality": "1080p",
+      "url": "http://localhost:3000/api/v2/stream/proxy?token=6f23ae9a1b0213...&download=true"
+    },
+    {
+      "quality": "720p",
+      "url": "http://localhost:3000/api/v2/stream/proxy?token=8c46f1b1c3098d...&download=true"
     }
   ]
 }
@@ -698,210 +435,81 @@ Fetches trending, popular, top-rated, upcoming, or discover lists from TMDB, nor
 
 ---
 
-### 10. TMDB TV Season Episodes
-`GET /api/v2/tmdb/season/:tmdbId/:seasonNumber`
+### 5. Watch History
+Endpoints used to manage watch progress and history cards. Capped at 100 entries locally (`data/history.json`).
 
-Fetches the list of episodes for a specific TV show season from TMDB, mapping each episode with a composite identifier (e.g., `tmdbId-seasonNumber-episodeNumber`) and pre-associating it with a provider.
-
-**Path Parameters:**
-* `:tmdbId` (number, required): TMDB ID of the TV show.
-* `:seasonNumber` (number, required): Season index (1-based).
-
-**Query Parameters:**
-* `provider` (string, optional): Provider metadata name (defaults to `peachify`).
-
-**Example Response:**
-```json
-{
-  "ok": true,
-  "success": true,
-  "results": [
-    {
-      "id": "71912-1-1",
-      "provider": "peachify",
-      "episode_number": 1,
-      "name": "Episode 1 Name",
-      "still_path": "https://image.tmdb.org/t/p/w300/...",
-      "still": "https://image.tmdb.org/t/p/w300/...",
-      "air_date": "2026-06-24",
-      "airDate": "2026-06-24",
-      "runtime": 45,
-      "overview": "Episode description..."
-    }
-  ]
-}
-```
-
----
-
-### 11. Watch History
-Allows the client to query, save, delete, or clear watch history progress items. The backend stores history items in a local JSON database (`data/history.json`) capped at 100 entries, sorted by most recently watched.
-
-#### A. Get History
+#### A. Fetch History
 `GET /api/v2/history`
 
-**Example Response:**
+**Response Schema:**
 ```json
 {
   "ok": true,
   "success": true,
   "items": [
     {
+      "tmdbId": 1007757,
+      "provider": "peachify",
+      "position": 350,
+      "progress": 350,
+      "duration": 5640,
+      "lastWatched": 1782305740000,
+      "updatedAt": 1782305740000,
       "movie": {
-        "id": 1367220,
-        "title": "Karuppu",
-        "overview": "...",
+        "id": 1007757,
+        "title": "Swapped",
         "type": "movie",
-        "posterPath": "..."
+        "posterPath": "https://image.tmdb.org/t/p/w185/..."
       },
-      "progress": 320,
-      "duration": 7200,
-      "updatedAt": 1782305734000,
       "playContext": {
         "provider": "peachify",
-        "id": "1367220"
-      },
-      "tmdbId": 1367220,
-      "provider": "peachify",
-      "position": 320,
-      "season": null,
-      "episode": null,
-      "lastWatched": 1782305734000
+        "id": "1007757"
+      }
     }
   ]
 }
 ```
 
-#### B. Save/Update History
+#### B. Save History
 `POST /api/v2/history`
 
-Saves or updates watch progress for a movie or TV episode.
+Saves or updates watch history progress.
+* **Request Payload:** `{ movie: { id, title, type, posterPath }, progress: 350, duration: 5640, playContext: { provider, id } }`
+* **Response:** `{ ok: true, success: true, item: { ... } }`
 
-**Request Body (JSON):**
-```json
-{
-  "movie": {
-    "id": 1367220,
-    "title": "Karuppu",
-    "overview": "...",
-    "type": "movie",
-    "posterPath": "..."
-  },
-  "progress": 350,
-  "duration": 7200,
-  "playContext": {
-    "provider": "peachify",
-    "id": "1367220"
-  }
-}
-```
-*Note: For TV shows, the `playContext.id` must be formatted as `tmdbId-season-episode` (e.g., `71912-1-1`) to enable episode-specific progress saving.*
-
-**Example Response:**
-```json
-{
-  "ok": true,
-  "success": true,
-  "item": {
-    "movie": {
-      "id": 1367220,
-      "title": "Karuppu",
-      "overview": "...",
-      "type": "movie",
-      "posterPath": "..."
-    },
-    "progress": 350,
-    "duration": 7200,
-    "updatedAt": 1782305740000,
-    "playContext": {
-      "provider": "peachify",
-      "id": "1367220"
-    },
-    "tmdbId": 1367220,
-    "provider": "peachify",
-    "position": 350,
-    "season": null,
-    "episode": null,
-    "lastWatched": 1782305740000
-  }
-}
-```
-
-#### C. Remove Specific Item
+#### C. Remove Entry
 `DELETE /api/v2/history/:type/:id`
+* **Response:** `{ ok: true, success: true }`
 
-**Path Parameters:**
-* `:type` (string, required): `movie` or `tv`.
-* `:id` (number, required): TMDB ID to remove.
-
-**Example Response:**
-```json
-{
-  "ok": true,
-  "success": true
-}
-```
-
-#### D. Clear Entire History
+#### D. Clear History
 `DELETE /api/v2/history`
-
-**Example Response:**
-```json
-{
-  "ok": true,
-  "success": true
-}
-```
+* **Response:** `{ ok: true, success: true }`
 
 ---
 
-## 🔑 Key Design Decisions & Known Behaviours
+### 6. Providers Status
+`GET /api/providers`
+* **Response:** `{ ok: true, providers: [{ name: "peachify", displayName: "Peachify", priority: 1, status: "healthy", message: "Operational", responseTimeMs: 0, lastChecked: "..." }] }`
 
-### Sequential Pipeline (No Race Conditions)
-All stream and download pipelines use a `for...of` loop over a sorted provider array — **never `Promise.all`**. This guarantees NetMirror is always checked first and its result is final before Peachify is ever considered. The `getSortedProviders()` function sorts by `config.providerPriority` regardless of registration order.
+### 7. Health Check
+`GET /api/health`
+* **Response:** `{ status: "ok", timestamp: "...", uptime: "...", memory: { rss: "...", heapTotal: "...", heapUsed: "..." }, providers: { peachify: { status: "healthy", message: "Peachify reachable", responseTimeMs: 142 } } }`
 
-### NetMirror Variant Retry vs. Provider Fallback
-CDN `403` on a single variant ≠ provider offline. NetMirror builds a priority-ordered variant queue and exhausts every variant before throwing `STREAM_INVALID`. This distinction ensures Peachify is only used as a true last resort — when every NetMirror language variant's CDN token is invalid for the server IP.
+---
 
-To avoid rate limits (HTTP `429`) and massive latency from checking too many variants sequentially, two optimization layers are enforced in NetMirror's retry logic:
-1. **Variant Queue Capping**: The priority queue is capped at a maximum of **5 candidates**. If a title has many variants (e.g., *The Boys* has 15), checking is limited to the top 5 relevant variants (explicit choice → Tamil → Hindi → English → default → others in API order).
-2. **Immediate 429 Abortion**: If the NetMirror API (`net27.cc`) returns an HTTP `429` (Rate Limited) during variant details or direct embed fetching, the system **aborts immediately** and propagates the error upward, rather than attempting Cloudflare Worker proxy retries or trying subsequent variants. This fast-fails the provider and allows the pipeline to quickly switch to alternative providers like Peachify.
+## ⚡ Integration Testing & Verification
 
-| Error type | Has `err.code` | Meaning | ProviderManager response |
-|---|---|---|---|
-| `STREAM_INVALID` | `'STREAM_INVALID'` | NetMirror online; all CDN tokens invalid | Try next provider |
-| *(no code)* | `undefined` | Network failure (provider unreachable) | Try next provider |
+The integrity of the API manager pipelines, caching layers, and token routing is verified using a comprehensive test suite located at [pipeline.test.js](file:///d:/Kalai%20projects/Final-Try/moviezon-backend/src/__tests__/pipeline.test.js).
 
-### IP Signing & Backend Proxy
-All CDN tokens from `hakunaymatata.com` are signed for the **backend server's IP** (`clientIp = null`). The CDN check in `NetMirror.stream()` runs directly from the Render server — never via a CF Worker — because the token IP must match the checking IP. Using a CF Worker intermediary introduces a different IP and produces `403` even on valid tokens.
+### Test Suite Execution
+Run the integration tests using the native Node.js runner:
+```powershell
+node --test src/__tests__/pipeline.test.js
+```
 
-Stream URLs returned to the client are wrapped in `/api/v2/stream/proxy`, which for playback routes through `streamhub-proxy` (to save bandwidth) and for downloads fetches directly from the Render server.
-
-### Frontend Contract
-The frontend calls exactly three backend endpoints:
-1. `GET /api/v2/details/tmdb/:id` — metadata + availability status
-2. `GET /api/v2/stream/tmdb/:tmdbId` — auto-play (backend picks provider)
-3. `GET /api/v2/download/tmdb/:tmdbId` — download (backend picks provider)
-
-The frontend **never** passes a provider name to the stream or download endpoint. Provider selection is 100% the backend's responsibility.
-
-### Peachify on Render (Degraded health, functional streams)
-Render's datacenter IP is blocked by `eat-peach.sbs`. Peachify bypasses this by routing scraper requests through `streamhub-proxy` Cloudflare Worker, encoding `Referer`, `Origin`, and `User-Agent` headers in the query string. If the CF Worker also returns `403`, Peachify falls back to embed sources.
-
-### Token Expiry Window
-CDN tokens contain a `t` Unix timestamp (generation time). Tokens are treated as valid for `3600 − 60 = 3540 seconds`. The 60-second early-rejection buffer ensures the client never receives a URL that expires mid-playback.
-
-### Test Coverage
-All architectural rules are enforced by the integration test suite in `src/__tests__/pipeline.test.js` (38 tests, 9 suites — run with `node --test src/__tests__/pipeline.test.js`):
-
-| Suite | Coverage |
-|---|---|
-| Details Pipeline Phase 2 | Sequential ordering, cache-first, no CDN URLs in sources |
-| Stream Pipeline resolveStream | NetMirror always first, sequential fallback, empty stream handling |
-| Download Pipeline resolveDownload | NetMirror first, Peachify embed-only skip |
-| NetMirror Variant Retry | CDN 403 retry, STREAM_INVALID vs PROVIDER_OFFLINE, token-expired variant skip |
-| Provider Priority ordering | `getSortedProviders()` determinism |
-| Peachify Resilient Get | Direct, proxy, worker proxy, proxy bypass |
-| NetMirror Provider Stream Resolution | Variant list capping to 5, direct request 429 propagation, playability/direct fallback |
-| Stream Caching & Pipeline Caching | Cache hit reuse, variant-keyed pipeline caching |
-| HLS Playlist Rewriting | Comment URI rewriting for alternate audio / multi-language and keys |
+### Key Test Coverages
+1. **Details Pipeline:** Verifies sequential calling, caching layers, and details enrichment flows.
+2. **Stream Pipeline:** Verifies that resolving stream returns correct provider configurations.
+3. **Download Pipeline:** Verifies that download links are generated with token parameters.
+4. **HLS Playlist Rewriter:** Asserts that HLS playlists are correctly rewritten with proxy variables.
+5. **Proxy Rotation Test Bypass:** Confirms that `isTestEnv` prevents tests from running requests through Webshare proxies, keeping test executions clean and deterministic.

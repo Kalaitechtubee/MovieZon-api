@@ -2,6 +2,7 @@ const tmdbService = require('../services/tmdb');
 const providerManager = require('../services/provider-manager');
 const playerService = require('../services/player');
 const logger = require('../logger');
+const cache = require('../cache');
 
 const apiController = {
   /**
@@ -703,6 +704,203 @@ const apiController = {
         success: true,
         results: []
       });
+    }
+  },
+
+  /**
+   * GET /api/v2/stream/auto/:tmdbId?type=movie|tv&season=1&episode=1
+   * Intelligent Automatic Failover streaming using Server-Sent Events (SSE).
+   */
+  async resolveStreamAuto(req, res, next) {
+    try {
+      const { tmdbId } = req.params;
+      const { type, season, episode, variant } = req.query;
+
+      const parsedType = (type || 'movie').toLowerCase();
+      if (!['movie', 'tv'].includes(parsedType)) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Query parameter "type" must be "movie" or "tv".'
+        });
+      }
+
+      const seasonNum = season ? parseInt(season, 10) : 1;
+      const episodeNum = episode ? parseInt(episode, 10) : 1;
+
+      if (parsedType === 'tv' && (isNaN(seasonNum) || isNaN(episodeNum))) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'For type "tv", "season" and "episode" must be valid numbers.'
+        });
+      }
+
+      logger.info(`[ResolveStreamAuto] SSE failover streaming requested for TMDB ${tmdbId} (${parsedType} S${seasonNum}E${episodeNum})`);
+
+      // Set up EventSource SSE headers
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+
+      const sendEvent = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      };
+
+      const pipelineCacheKey = `pipeline:${parsedType}:${tmdbId}:${seasonNum}:${episodeNum}:${variant || 'default'}`;
+      const lastSuccessProviderCacheKey = `last_success_provider:${tmdbId}`;
+
+      // Check cache first
+      const cachedResult = cache.get(pipelineCacheKey);
+      if (cachedResult) {
+        logger.info(`[ResolveStreamAuto] Cache HIT for TMDB ${tmdbId}`);
+        sendEvent({
+          status: 'STARTING',
+          providers: [cachedResult.selectedProvider || 'cached']
+        });
+        sendEvent({
+          status: 'SUCCESS',
+          provider: cachedResult.selectedProvider,
+          stream: cachedResult
+        });
+        res.end();
+        return;
+      }
+
+      const sortedProviders = providerManager.getSortedProviders();
+      const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
+
+      let providersToTry = [...sortedProviders];
+      if (lastSuccessfulProvider) {
+        const idx = providersToTry.findIndex(p => p.name === lastSuccessfulProvider);
+        if (idx !== -1) {
+          const [p] = providersToTry.splice(idx, 1);
+          providersToTry.unshift(p);
+          logger.info(`[ResolveStreamAuto] Prioritized last successful provider: ${p.displayName} for TMDB ${tmdbId}`);
+        }
+      }
+
+      // Send start event
+      sendEvent({
+        status: 'STARTING',
+        providers: providersToTry.map(p => p.name)
+      });
+
+      const errors = [];
+      let successData = null;
+
+      for (const provider of providersToTry) {
+        // Skip offline providers
+        try {
+          const health = await provider.health();
+          if (health && health.status === 'unhealthy') {
+            logger.info(`[ResolveStreamAuto] Skip offline provider: ${provider.displayName}`);
+            sendEvent({
+              status: 'SKIPPED',
+              provider: provider.name,
+              reason: 'Provider offline'
+            });
+            continue;
+          }
+        } catch (healthErr) {
+          // ignore
+        }
+
+        let attempts = 0;
+        let success = false;
+
+        while (attempts < 2 && !success) {
+          attempts++;
+          sendEvent({
+            status: 'TRYING',
+            provider: provider.name,
+            attempt: attempts
+          });
+
+          try {
+            logger.info(`[ResolveStreamAuto] Trying provider ${provider.displayName} (Attempt ${attempts})`);
+            const streamData = await provider.stream(tmdbId, parsedType, seasonNum, episodeNum, variant || null, null);
+            if (streamData && (streamData.streamUrl || streamData.embedUrl)) {
+              // Apply proxy URLs
+              if (streamData.streamUrl) {
+                streamData.streamUrl = playerService.getProxyUrl(req, streamData.streamUrl, streamData.headers);
+              }
+              if (streamData.qualities && Array.isArray(streamData.qualities)) {
+                streamData.qualities = streamData.qualities.map(q => ({
+                  ...q,
+                  url: playerService.getProxyUrl(req, q.url, q.headers || streamData.headers)
+                }));
+              }
+              if (streamData.subtitles && Array.isArray(streamData.subtitles)) {
+                streamData.subtitles = streamData.subtitles.map(sub => {
+                  if (!sub.url) return sub;
+                  let subHeaders = { ...(streamData.headers || {}) };
+                  return { ...sub, url: playerService.getProxyUrl(req, sub.url, subHeaders) };
+                });
+              }
+
+              successData = {
+                ok: true,
+                success: true,
+                available: true,
+                provider: provider.name,
+                selectedProvider: provider.name,
+                fallbackTriggered: errors.length > 0,
+                subjectId: String(tmdbId),
+                streamType: streamData.streamType || (streamData.embedUrl ? 'embed' : 'hls'),
+                streams: streamData.qualities || [],
+                subtitles: streamData.subtitles || [],
+                embedUrl: streamData.embedUrl || null,
+                embedFallbacks: streamData.embedFallbacks || [],
+                variants: streamData.variants || [],
+                selectedVariantId: streamData.selectedVariantId || null,
+                stream: streamData
+              };
+
+              cache.set(pipelineCacheKey, successData, 1800);
+              cache.set(lastSuccessProviderCacheKey, provider.name, 1800);
+
+              sendEvent({
+                status: 'SUCCESS',
+                provider: provider.name,
+                stream: successData
+              });
+
+              success = true;
+              break;
+            }
+          } catch (err) {
+            logger.error(`[ResolveStreamAuto] ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
+            if (attempts >= 2) {
+              errors.push(`${provider.name}: ${err.message}`);
+              sendEvent({
+                status: 'FAILED',
+                provider: provider.name,
+                reason: err.message
+              });
+            } else {
+              // Delay 500ms before retry
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          }
+        }
+
+        if (success) break;
+      }
+
+      if (!successData) {
+        logger.error(`[ResolveStreamAuto] All providers failed for TMDB ${tmdbId}`);
+        sendEvent({
+          status: 'FAILED_ALL',
+          reason: 'ALL_PROVIDERS_FAILED',
+          message: `All providers failed: ${errors.join(', ')}`
+        });
+      }
+    } catch (err) {
+      logger.error(`[ResolveStreamAuto] Fatal error: ${err.message}`);
+    } finally {
+      res.end();
     }
   },
 

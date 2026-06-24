@@ -1,4 +1,8 @@
 const PeachifyProvider = require('../../providers/peachify');
+const StreamImdbProvider = require('../../providers/streamimdb');
+const AutoEmbedProvider = require('../../providers/autoembed');
+const EmbedSuProvider = require('../../providers/embedsu');
+const VidSrcProvider = require('../../providers/vidsrc');
 const tmdbService = require('../tmdb');
 const cache = require('../../cache');
 const logger = require('../../logger');
@@ -41,6 +45,22 @@ class ProviderManager {
     // Register Peachify initially
     const peachify = new PeachifyProvider();
     this.providers.set(peachify.name, peachify);
+
+    // Register StreamIMDb
+    const streamimdb = new StreamImdbProvider();
+    this.providers.set(streamimdb.name, streamimdb);
+
+    // Register AutoEmbed
+    const autoembed = new AutoEmbedProvider();
+    this.providers.set(autoembed.name, autoembed);
+
+    // Register EmbedSU
+    const embedsu = new EmbedSuProvider();
+    this.providers.set(embedsu.name, embedsu);
+
+    // Register VidSrc
+    const vidsrc = new VidSrcProvider();
+    this.providers.set(vidsrc.name, vidsrc);
   }
 
   /**
@@ -58,7 +78,7 @@ class ProviderManager {
    * Get sorted providers by priority config
    */
   getSortedProviders() {
-    const priority = config.providerPriority || ['peachify'];
+    const priority = config.providerPriority || ['peachify', 'streamimdb', 'autoembed', 'embedsu', 'vidsrc'];
     return Array.from(this.providers.values()).sort((a, b) => {
       const idxA = priority.indexOf(a.name);
       const idxB = priority.indexOf(b.name);
@@ -68,6 +88,7 @@ class ProviderManager {
       return a.name.localeCompare(b.name);
     });
   }
+
 
   /**
    * Get provider by name
@@ -107,40 +128,60 @@ class ProviderManager {
     const nativeLang = getLanguageName(tmdbData.language || 'en');
     const audioLangs = [nativeLang];
 
-    // 2. Fetch stream details for Peachify to build embed links and confirm availability
-    const peachify = this.providers.get('peachify');
-    let isPlayable = false;
-    let embedUrl = null;
-    let embedFallbacks = [];
+    // 2. Fetch stream details for all sorted providers to confirm availability
+    const sortedProviders = this.getSortedProviders();
+    const sources = [];
+    let downloadAvailable = false;
+    let firstPlayableProvider = null;
+    let primaryEmbedUrl = null;
+    let primaryEmbedFallbacks = [];
 
-    try {
-      const streamData = await peachify.stream(tmdbId, type, 1, 1);
-      if (streamData && streamData.embedUrl) {
-        isPlayable = true;
-        embedUrl = streamData.embedUrl;
-        embedFallbacks = streamData.embedFallbacks || [];
+    for (let idx = 0; idx < sortedProviders.length; idx++) {
+      const provider = sortedProviders[idx];
+      let providerPlayable = false;
+      let providerEmbedUrl = null;
+      let providerEmbedFallbacks = [];
+
+      try {
+        const streamData = await provider.stream(tmdbId, type, 1, 1);
+        if (streamData && (streamData.streamUrl || streamData.embedUrl)) {
+          providerPlayable = true;
+          providerEmbedUrl = streamData.embedUrl;
+          providerEmbedFallbacks = streamData.embedFallbacks || [];
+          
+          if (!firstPlayableProvider) {
+            firstPlayableProvider = provider.name;
+            primaryEmbedUrl = providerEmbedUrl;
+            primaryEmbedFallbacks = providerEmbedFallbacks;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[DetailsP] ${provider.displayName} availability check failed: ${err.message}`);
       }
-    } catch (err) {
-      logger.warn(`[DetailsP] Peachify availability check failed: ${err.message}`);
+
+      sources.push({
+        provider: provider.name,
+        label: provider.displayName,
+        id: String(tmdbId),
+        serverIndex: idx + 1,
+        available: providerPlayable,
+        downloadSupported: provider.downloadSupported,
+        languages: audioLangs,
+        streamType: provider.name === 'peachify' ? 'embed' : 'hls',
+        embedUrl: providerEmbedUrl,
+        embedFallbacks: providerEmbedFallbacks,
+        variants: []
+      });
+
+      if (providerPlayable && provider.downloadSupported) {
+        downloadAvailable = true;
+      }
     }
 
-    const sources = [
-      {
-        provider: 'peachify',
-        id: String(tmdbId),
-        serverIndex: 1,
-        available: isPlayable,
-        downloadSupported: peachify.downloadSupported,
-        languages: audioLangs,
-        streamType: 'embed',
-        embedUrl: embedUrl,
-        embedFallbacks: embedFallbacks,
-        variants: []
-      }
-    ];
-
-    // Determine the watch provider from TMDB metadata if valid, otherwise default to 'peachify'
-    const resolvedProvider = (tmdbData.provider && tmdbData.provider !== 'tmdb') ? tmdbData.provider : 'peachify';
+    // Determine the watch provider from TMDB metadata if valid, otherwise default to the first playable provider
+    const resolvedProvider = (tmdbData.provider && tmdbData.provider !== 'tmdb')
+      ? tmdbData.provider
+      : (firstPlayableProvider || 'peachify');
 
     // 3. Build unified structured object and flat fields
     const result = {
@@ -153,18 +194,18 @@ class ProviderManager {
       supportedAudio: audioLangs,
       supportedSubtitles: [],
       supportedQualities: [],
-      downloadAvailable: isPlayable && peachify.downloadSupported,
+      downloadAvailable: downloadAvailable,
 
       // Structured API contract fields
       player: {
-        provider: 'peachify',
-        type: 'iframe', // Peachify is iframe embed
-        available: isPlayable,
-        embedUrl: embedUrl,
-        embedFallbacks: embedFallbacks
+        provider: resolvedProvider,
+        type: resolvedProvider === 'peachify' ? 'iframe' : 'hls',
+        available: !!firstPlayableProvider,
+        embedUrl: primaryEmbedUrl,
+        embedFallbacks: primaryEmbedFallbacks
       },
       download: {
-        available: isPlayable && peachify.downloadSupported,
+        available: downloadAvailable,
         qualities: []
       }
     };
@@ -199,63 +240,146 @@ class ProviderManager {
     }
 
     logger.info(`[Pipeline] Sequential stream resolution for TMDB ${tmdbId}`);
-    const peachify = this.providers.get('peachify');
-    if (!peachify) {
-      return { available: false, reason: 'Peachify provider not registered' };
+    const sortedProviders = this.getSortedProviders();
+    const lastSuccessProviderCacheKey = `last_success_provider:${tmdbId}`;
+    const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
+
+    let providersToTry = [...sortedProviders];
+    if (lastSuccessfulProvider) {
+      const idx = providersToTry.findIndex(p => p.name === lastSuccessfulProvider);
+      if (idx !== -1) {
+        const [p] = providersToTry.splice(idx, 1);
+        providersToTry.unshift(p);
+        logger.info(`[Pipeline] Prioritized last successful provider: ${p.displayName} for TMDB ${tmdbId}`);
+      }
     }
 
-    try {
-      const streamData = await peachify.stream(tmdbId, type, season, episode, variantId, clientIp);
-      const resolvedResult = {
-        ...streamData,
-        selectedProvider: 'peachify',
-        available: true,
-        fallbackTriggered: false
-      };
+    const errors = [];
 
-      cache.set(pipelineCacheKey, resolvedResult, 1800);
-      return resolvedResult;
-    } catch (err) {
-      logger.error(`[Pipeline] Peachify stream resolution failed: ${err.message}`);
-      return {
-        available: false,
-        reason: err.message
-      };
-    }
-  }
-
-  /**
-   * Download stream pipeline.
-   * Return available: false because Peachify doesn't support downloads.
-   */
-  async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
-    logger.info(`[DownloadP] Sequential download resolution for TMDB ${tmdbId}`);
-    
-    // Iterate through registered providers (currently only Peachify, but dynamically handles others)
-    const sortedProviders = Array.from(this.providers.values());
-
-    for (const provider of sortedProviders) {
+    for (const provider of providersToTry) {
+      // Check health status to skip if offline
       try {
-        logger.info(`[DownloadP] Trying provider: ${provider.displayName}`);
-        const downloadData = await provider.download(tmdbId, type, season, episode, variantId);
-        if (downloadData && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
-          logger.info(`[DownloadP] Successfully resolved download using provider: ${provider.displayName}`);
-          return {
-            ...downloadData,
-            selectedProvider: provider.name,
-            available: true
-          };
+        const health = await provider.health();
+        if (health && health.status === 'unhealthy') {
+          logger.info(`[Pipeline] Skipping offline provider: ${provider.displayName}`);
+          continue;
         }
-      } catch (err) {
-        logger.warn(`[DownloadP] Provider ${provider.displayName} download resolution failed: ${err.message}`);
+      } catch (healthErr) {
+        // ignore health check issues
+      }
+
+      let attempts = 0;
+      let success = false;
+      let streamData = null;
+
+      while (attempts < 2 && !success) {
+        attempts++;
+        try {
+          logger.info(`[Pipeline] Trying provider: ${provider.displayName} (Attempt ${attempts})`);
+          streamData = await provider.stream(tmdbId, type, season, episode, variantId, clientIp);
+          if (streamData && (streamData.streamUrl || streamData.embedUrl)) {
+            success = true;
+          }
+        } catch (err) {
+          logger.error(`[Pipeline] ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
+          if (attempts >= 2) {
+            errors.push(`${provider.name}: ${err.message}`);
+          } else {
+            // Delay 500ms before retry
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        }
+      }
+
+      if (success && streamData) {
+        const resolvedResult = {
+          ...streamData,
+          selectedProvider: provider.name,
+          available: true,
+          fallbackTriggered: errors.length > 0
+        };
+
+        cache.set(pipelineCacheKey, resolvedResult, 1800);
+        cache.set(lastSuccessProviderCacheKey, provider.name, 1800);
+        return resolvedResult;
       }
     }
 
     return {
       available: false,
-      reason: 'No provider supports direct download for this title'
+      reason: `All providers failed: ${errors.join(', ')}`
     };
   }
+
+  /**
+   * Download stream pipeline.
+   */
+  async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
+    logger.info(`[DownloadP] Sequential download resolution for TMDB ${tmdbId}`);
+    
+    const sortedProviders = this.getSortedProviders();
+    const lastSuccessProviderCacheKey = `last_success_provider:${tmdbId}`;
+    const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
+
+    let providersToTry = [...sortedProviders];
+    if (lastSuccessfulProvider) {
+      const idx = providersToTry.findIndex(p => p.name === lastSuccessfulProvider);
+      if (idx !== -1) {
+        const [p] = providersToTry.splice(idx, 1);
+        providersToTry.unshift(p);
+      }
+    }
+
+    const errors = [];
+
+    for (const provider of providersToTry) {
+      // Check health status to skip if offline
+      try {
+        const health = await provider.health();
+        if (health && health.status === 'unhealthy') {
+          continue;
+        }
+      } catch (healthErr) {
+        // ignore
+      }
+
+      let attempts = 0;
+      let success = false;
+      let downloadData = null;
+
+      while (attempts < 2 && !success) {
+        attempts++;
+        try {
+          downloadData = await provider.download(tmdbId, type, season, episode, variantId);
+          if (downloadData && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
+            success = true;
+          }
+        } catch (err) {
+          logger.warn(`[DownloadP] Provider ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
+          if (attempts >= 2) {
+            errors.push(`${provider.name}: ${err.message}`);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        }
+      }
+
+      if (success && downloadData) {
+        logger.info(`[DownloadP] Successfully resolved download using provider: ${provider.displayName}`);
+        return {
+          ...downloadData,
+          selectedProvider: provider.name,
+          available: true
+        };
+      }
+    }
+
+    return {
+      available: false,
+      reason: `No provider supports direct download for this title: ${errors.join(', ')}`
+    };
+  }
+
 }
 
 module.exports = new ProviderManager();
