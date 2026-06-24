@@ -435,15 +435,41 @@ const apiController = {
         });
       }
 
-      // Peachify doesn't support downloads, but in case future providers do
-      if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
-        downloadResult.qualities = downloadResult.qualities.map(q => ({
-          ...q,
-          url: playerService.getProxyUrl(req, q.url, q.headers || downloadResult.headers) + '&download=true'
-        }));
+      // Fetch metadata for premium naming
+      let title = 'video';
+      try {
+        const details = await providerManager.resolveDetails(tmdbId, parsedType);
+        if (details && details.title) {
+          title = details.title;
+        }
+      } catch (e) {
+        // ignore
       }
-      if (downloadResult.streamUrl) {
-        downloadResult.streamUrl = playerService.getProxyUrl(req, downloadResult.streamUrl, downloadResult.headers) + '&download=true';
+      const cleanTitle = title.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim();
+
+      // Secure CDN links by wrapping them in encrypted tokens
+      let secureQualities = [];
+      const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      const host = req.get('host');
+      const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+
+      if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
+        secureQualities = downloadResult.qualities.map(q => {
+          const extension = q.url.split('?')[0].endsWith('.m3u8') ? 'm3u8' : 'mp4';
+          const suffix = parsedType === 'tv' ? `S${seasonNum}E${episodeNum}` : '';
+          const filename = `${cleanTitle}${suffix ? '_' + suffix : ''}_${q.quality || 'auto'}.${extension}`;
+          
+          const token = playerService.encryptToken({
+            url: q.url,
+            headers: q.headers || downloadResult.headers,
+            filename
+          });
+
+          return {
+            quality: q.quality,
+            url: `${proxyBase}?token=${encodeURIComponent(token)}&download=true`
+          };
+        });
       }
 
       res.json({
@@ -453,8 +479,121 @@ const apiController = {
         provider: downloadResult.selectedProvider,
         selectedProvider: downloadResult.selectedProvider,
         subjectId: String(tmdbId),
-        streams: downloadResult.qualities || [],
-        stream: downloadResult
+        streams: secureQualities,
+        stream: {
+          ...downloadResult,
+          qualities: secureQualities
+        }
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /**
+   * GET /api/v2/download/:provider/:id?type=movie|tv&season=1&episode=1
+   */
+  async explicitDownload(req, res, next) {
+    try {
+      const { provider, id } = req.params;
+      const { type, season, episode, variant } = req.query;
+
+      const parsedType = (type || 'movie').toLowerCase();
+      if (!['movie', 'tv'].includes(parsedType)) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Query parameter "type" must be "movie" or "tv".'
+        });
+      }
+
+      const seasonNum = season ? parseInt(season, 10) : 1;
+      const episodeNum = episode ? parseInt(episode, 10) : 1;
+
+      if (parsedType === 'tv' && (isNaN(seasonNum) || isNaN(episodeNum))) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'For type "tv", "season" and "episode" must be valid numbers.'
+        });
+      }
+
+      logger.info(`[ExplicitDownload] Provider ${provider} ID ${id} (${parsedType} S${seasonNum}E${episodeNum})`);
+
+      const providerInstance = providerManager.get(provider);
+      if (!providerInstance) {
+        return res.status(400).json({
+          success: false,
+          error: 'Bad Request',
+          message: `Provider "${provider}" is not registered.`
+        });
+      }
+
+      const downloadResult = await providerInstance.download(
+        id,
+        parsedType,
+        seasonNum,
+        episodeNum,
+        variant || null
+      );
+
+      if (!downloadResult || !downloadResult.available) {
+        return res.status(404).json({
+          ok: false,
+          success: false,
+          available: false,
+          reason: 'No direct download stream resolved for this provider.',
+          streams: []
+        });
+      }
+
+      // Fetch metadata to get title
+      let title = 'video';
+      try {
+        const details = await providerManager.resolveDetails(id, parsedType);
+        if (details && details.title) {
+          title = details.title;
+        }
+      } catch (e) {
+        // ignore
+      }
+      const cleanTitle = title.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim();
+
+      // Secure CDN links by wrapping them in encrypted tokens
+      let secureQualities = [];
+      const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      const host = req.get('host');
+      const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+
+      if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
+        secureQualities = downloadResult.qualities.map(q => {
+          const extension = q.url.split('?')[0].endsWith('.m3u8') ? 'm3u8' : 'mp4';
+          const suffix = parsedType === 'tv' ? `S${seasonNum}E${episodeNum}` : '';
+          const filename = `${cleanTitle}${suffix ? '_' + suffix : ''}_${q.quality || 'auto'}.${extension}`;
+          
+          const token = playerService.encryptToken({
+            url: q.url,
+            headers: q.headers || downloadResult.headers,
+            filename
+          });
+
+          return {
+            quality: q.quality,
+            url: `${proxyBase}?token=${encodeURIComponent(token)}&download=true`
+          };
+        });
+      }
+
+      res.json({
+        ok: true,
+        success: true,
+        available: true,
+        provider: provider.toLowerCase(),
+        selectedProvider: provider.toLowerCase(),
+        subjectId: String(id),
+        streams: secureQualities,
+        stream: {
+          ...downloadResult,
+          qualities: secureQualities
+        }
       });
     } catch (err) {
       next(err);

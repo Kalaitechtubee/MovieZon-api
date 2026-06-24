@@ -55,6 +55,21 @@ class ProviderManager {
   }
 
   /**
+   * Get sorted providers by priority config
+   */
+  getSortedProviders() {
+    const priority = config.providerPriority || ['peachify'];
+    return Array.from(this.providers.values()).sort((a, b) => {
+      const idxA = priority.indexOf(a.name);
+      const idxB = priority.indexOf(b.name);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  /**
    * Get provider by name
    */
   get(name) {
@@ -115,7 +130,7 @@ class ProviderManager {
         id: String(tmdbId),
         serverIndex: 1,
         available: isPlayable,
-        downloadSupported: false,
+        downloadSupported: peachify.downloadSupported,
         languages: audioLangs,
         streamType: 'embed',
         embedUrl: embedUrl,
@@ -138,7 +153,7 @@ class ProviderManager {
       supportedAudio: audioLangs,
       supportedSubtitles: [],
       supportedQualities: [],
-      downloadAvailable: false,
+      downloadAvailable: isPlayable && peachify.downloadSupported,
 
       // Structured API contract fields
       player: {
@@ -149,7 +164,7 @@ class ProviderManager {
         embedFallbacks: embedFallbacks
       },
       download: {
-        available: false,
+        available: isPlayable && peachify.downloadSupported,
         qualities: []
       }
     };
@@ -215,6 +230,27 @@ class ProviderManager {
    */
   async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
     logger.info(`[DownloadP] Sequential download resolution for TMDB ${tmdbId}`);
+    
+    // Iterate through registered providers (currently only Peachify, but dynamically handles others)
+    const sortedProviders = Array.from(this.providers.values());
+
+    for (const provider of sortedProviders) {
+      try {
+        logger.info(`[DownloadP] Trying provider: ${provider.displayName}`);
+        const downloadData = await provider.download(tmdbId, type, season, episode, variantId);
+        if (downloadData && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
+          logger.info(`[DownloadP] Successfully resolved download using provider: ${provider.displayName}`);
+          return {
+            ...downloadData,
+            selectedProvider: provider.name,
+            available: true
+          };
+        }
+      } catch (err) {
+        logger.warn(`[DownloadP] Provider ${provider.displayName} download resolution failed: ${err.message}`);
+      }
+    }
+
     return {
       available: false,
       reason: 'No provider supports direct download for this title'

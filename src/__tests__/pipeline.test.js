@@ -633,6 +633,8 @@ describe('Peachify Resilient Get — Proxy, Direct, and Worker Fallback', () => 
 
   beforeEach(() => {
     originalProxyUrl = config.proxyUrl;
+    delete require.cache[require.resolve('../providers/peachify')];
+    delete require.cache[require.resolve('../providers/peachify/utils')];
   });
 
   afterEach(() => {
@@ -858,7 +860,8 @@ describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
   });
 
   test('TC-HLS01: Should rewrite absolute and relative URIs inside HLS comments (#EXT-X-MEDIA) and segment URLs', async () => {
-    // Force reload apiController so it binds to our mocked axios
+    // Force reload player and apiController so they bind to our mocked axios
+    delete require.cache[require.resolve('../services/player')];
     delete require.cache[require.resolve('../controllers/apiController')];
     const apiController = require('../controllers/apiController');
 
@@ -901,6 +904,31 @@ describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
     // Verify that both the URI inside #EXT-X-MEDIA and the segment URL were rewritten to route through proxy
     assert.ok(responseBody.includes('URI="http://localhost:3000/api/v2/stream/proxy?url=https%3A%2F%2Fuwu.eat-peach.sbs%2Fnet%2Fm3u8%2Ffcdb9bb9.m3u8%3Fsrc%3Dhttps%253A%252F%252Fs22.nm-cdn11.top%252F1.m3u8"'));
     assert.ok(responseBody.includes('http://localhost:3000/api/v2/stream/proxy?url=https%3A%2F%2Fuwu.eat-peach.sbs%2Fnet%2Fm3u8%2Ffcdb9bb9.m3u8%3Fsrc%3Dhttps%253A%252F%252Fs22.nm-cdn11.top%252F1.m3u8'));
+  });
+});
+
+describe('Secure Download Pipeline & Token Proxying', () => {
+  const playerService = require('../services/player');
+
+  test('TC-TD01: Should correctly encrypt and decrypt proxy tokens', () => {
+    const payload = {
+      url: 'https://bcdnxw.hakunaymatata.com/resource/video.mp4',
+      headers: { 'referer': 'https://netfilm.world/' },
+      filename: 'Swapped_1080p.mp4'
+    };
+
+    const token = playerService.encryptToken(payload);
+    assert.ok(token);
+    assert.ok(token.includes(':'));
+
+    const decrypted = playerService.decryptToken(token);
+    assert.deepEqual(decrypted, payload);
+  });
+
+  test('TC-TD02: Should fail to decrypt modified or invalid tokens', () => {
+    const invalidToken = 'abcde:12345';
+    const decrypted = playerService.decryptToken(invalidToken);
+    assert.equal(decrypted, null);
   });
 });
 

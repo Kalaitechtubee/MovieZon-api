@@ -658,6 +658,203 @@ Proxies raw video binary streams to bypass CORS, Referer, and IP-restriction che
 
 ---
 
+### 9. TMDB Category Lists
+`GET /api/v2/tmdb/:category`
+
+Fetches trending, popular, top-rated, upcoming, or discover lists from TMDB, normalizes them, and returns standard catalog items.
+
+**Path Parameters:**
+* `:category` (string, required): One of `trending`, `popular`, `popular_tv`, `top_rated`, `upcoming`, `discover`.
+
+**Query Parameters:**
+* `media` (string, optional): For `trending` category (`all`, `movie`, `tv` - default: `all`).
+* `time` (string, optional): For `trending` category (`day`, `week` - default: `week`).
+* `type` (string, optional): For `top_rated` or `discover` categories (`movie`, `tv` - default: `movie`).
+* Any other query parameters (e.g. `page`, `with_genres`) are automatically forwarded to the TMDB API.
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true,
+  "results": [
+    {
+      "id": "1367220",
+      "provider": "tmdb",
+      "tmdbId": 1367220,
+      "title": "Karuppu",
+      "originalTitle": "Karuppu",
+      "year": 2026,
+      "type": "movie",
+      "rating": 7.1,
+      "poster": "https://image.tmdb.org/t/p/w342/...",
+      "backdrop": "https://image.tmdb.org/t/p/w780/...",
+      "overview": "...",
+      "language": "ta"
+    }
+  ]
+}
+```
+
+---
+
+### 10. TMDB TV Season Episodes
+`GET /api/v2/tmdb/season/:tmdbId/:seasonNumber`
+
+Fetches the list of episodes for a specific TV show season from TMDB, mapping each episode with a composite identifier (e.g., `tmdbId-seasonNumber-episodeNumber`) and pre-associating it with a provider.
+
+**Path Parameters:**
+* `:tmdbId` (number, required): TMDB ID of the TV show.
+* `:seasonNumber` (number, required): Season index (1-based).
+
+**Query Parameters:**
+* `provider` (string, optional): Provider metadata name (defaults to `peachify`).
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true,
+  "results": [
+    {
+      "id": "71912-1-1",
+      "provider": "peachify",
+      "episode_number": 1,
+      "name": "Episode 1 Name",
+      "still_path": "https://image.tmdb.org/t/p/w300/...",
+      "still": "https://image.tmdb.org/t/p/w300/...",
+      "air_date": "2026-06-24",
+      "airDate": "2026-06-24",
+      "runtime": 45,
+      "overview": "Episode description..."
+    }
+  ]
+}
+```
+
+---
+
+### 11. Watch History
+Allows the client to query, save, delete, or clear watch history progress items. The backend stores history items in a local JSON database (`data/history.json`) capped at 100 entries, sorted by most recently watched.
+
+#### A. Get History
+`GET /api/v2/history`
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true,
+  "items": [
+    {
+      "movie": {
+        "id": 1367220,
+        "title": "Karuppu",
+        "overview": "...",
+        "type": "movie",
+        "posterPath": "..."
+      },
+      "progress": 320,
+      "duration": 7200,
+      "updatedAt": 1782305734000,
+      "playContext": {
+        "provider": "peachify",
+        "id": "1367220"
+      },
+      "tmdbId": 1367220,
+      "provider": "peachify",
+      "position": 320,
+      "season": null,
+      "episode": null,
+      "lastWatched": 1782305734000
+    }
+  ]
+}
+```
+
+#### B. Save/Update History
+`POST /api/v2/history`
+
+Saves or updates watch progress for a movie or TV episode.
+
+**Request Body (JSON):**
+```json
+{
+  "movie": {
+    "id": 1367220,
+    "title": "Karuppu",
+    "overview": "...",
+    "type": "movie",
+    "posterPath": "..."
+  },
+  "progress": 350,
+  "duration": 7200,
+  "playContext": {
+    "provider": "peachify",
+    "id": "1367220"
+  }
+}
+```
+*Note: For TV shows, the `playContext.id` must be formatted as `tmdbId-season-episode` (e.g., `71912-1-1`) to enable episode-specific progress saving.*
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true,
+  "item": {
+    "movie": {
+      "id": 1367220,
+      "title": "Karuppu",
+      "overview": "...",
+      "type": "movie",
+      "posterPath": "..."
+    },
+    "progress": 350,
+    "duration": 7200,
+    "updatedAt": 1782305740000,
+    "playContext": {
+      "provider": "peachify",
+      "id": "1367220"
+    },
+    "tmdbId": 1367220,
+    "provider": "peachify",
+    "position": 350,
+    "season": null,
+    "episode": null,
+    "lastWatched": 1782305740000
+  }
+}
+```
+
+#### C. Remove Specific Item
+`DELETE /api/v2/history/:type/:id`
+
+**Path Parameters:**
+* `:type` (string, required): `movie` or `tv`.
+* `:id` (number, required): TMDB ID to remove.
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true
+}
+```
+
+#### D. Clear Entire History
+`DELETE /api/v2/history`
+
+**Example Response:**
+```json
+{
+  "ok": true,
+  "success": true
+}
+```
+
+---
+
 ## 🔑 Key Design Decisions & Known Behaviours
 
 ### Sequential Pipeline (No Race Conditions)
@@ -708,4 +905,3 @@ All architectural rules are enforced by the integration test suite in `src/__tes
 | NetMirror Provider Stream Resolution | Variant list capping to 5, direct request 429 propagation, playability/direct fallback |
 | Stream Caching & Pipeline Caching | Cache hit reuse, variant-keyed pipeline caching |
 | HLS Playlist Rewriting | Comment URI rewriting for alternate audio / multi-language and keys |
-https://peachify/

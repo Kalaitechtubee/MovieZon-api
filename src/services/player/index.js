@@ -1,5 +1,40 @@
 const axios = require('axios');
 const logger = require('../../logger');
+const crypto = require('crypto');
+
+// Session secret key generated at startup for securing tokens
+const PROXY_TOKEN_SECRET = process.env.PROXY_TOKEN_SECRET || crypto.randomBytes(32);
+const IV_LENGTH = 16;
+
+/**
+ * Encrypt target URL and headers to generate a secure proxy token
+ */
+function encryptToken(payload) {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(PROXY_TOKEN_SECRET), iv);
+  let encrypted = cipher.update(JSON.stringify(payload), 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return `${iv.toString('hex')}:${encrypted}`;
+}
+
+/**
+ * Decrypt token to retrieve the original target URL and headers
+ */
+function decryptToken(token) {
+  try {
+    const parts = token.split(':');
+    if (parts.length !== 2) return null;
+    const iv = Buffer.from(parts[0], 'hex');
+    const encryptedText = parts[1];
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(PROXY_TOKEN_SECRET), iv);
+    let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  } catch (err) {
+    logger.error(`Failed to decrypt proxy token: ${err.message}`);
+    return null;
+  }
+}
 
 /**
  * Helper to build proxy URL for segments or subtitles
@@ -26,14 +61,29 @@ function getProxyUrl(req, originalUrl, streamHeaders) {
  */
 async function streamVideoProxy(req, res, next) {
   try {
-    const { url, headers: queryHeaders } = req.query;
-    if (!url) {
-      return res.status(400).json({ error: 'Bad Request', message: 'Missing "url" parameter.' });
-    }
+    const { url, headers: queryHeaders, token } = req.query;
+    
+    let targetUrl = '';
+    let decryptedHeaders = null;
+    let targetFilename = req.query.filename || 'video.mp4';
 
-    let targetUrl = url;
-    if (url.startsWith('http%3A%2F%2F') || url.startsWith('https%3A%2F%2F')) {
-      targetUrl = decodeURIComponent(url);
+    if (token) {
+      const decrypted = decryptToken(token);
+      if (!decrypted) {
+        return res.status(403).json({ error: 'Forbidden', message: 'Invalid or expired download token.' });
+      }
+      targetUrl = decrypted.url;
+      decryptedHeaders = decrypted.headers || null;
+      if (decrypted.filename) {
+        targetFilename = decrypted.filename;
+      }
+    } else if (url) {
+      targetUrl = url;
+      if (url.startsWith('http%3A%2F%2F') || url.startsWith('https%3A%2F%2F')) {
+        targetUrl = decodeURIComponent(url);
+      }
+    } else {
+      return res.status(400).json({ error: 'Bad Request', message: 'Missing "url" or "token" parameter.' });
     }
 
     // Only allow HTTP/HTTPS URLs
@@ -78,8 +128,7 @@ async function streamVideoProxy(req, res, next) {
 
     // Set attachment header for direct download trigger without navigation
     if (isDownload) {
-      const filename = req.query.filename || 'video.mp4';
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${targetFilename}"`);
     }
 
     const headers = {
@@ -87,7 +136,18 @@ async function streamVideoProxy(req, res, next) {
       'referer': 'https://net27.cc/'
     };
 
-    if (queryHeaders) {
+    // Merge in custom headers
+    if (decryptedHeaders) {
+      Object.keys(decryptedHeaders).forEach(k => {
+        const lowerKey = k.toLowerCase();
+        Object.keys(headers).forEach(hk => {
+          if (hk.toLowerCase() === lowerKey) {
+            delete headers[hk];
+          }
+        });
+        headers[lowerKey] = decryptedHeaders[k];
+      });
+    } else if (queryHeaders) {
       try {
         const rawHeaders = Array.isArray(queryHeaders) ? queryHeaders[queryHeaders.length - 1] : queryHeaders;
         const parsed = JSON.parse(decodeURIComponent(rawHeaders));
@@ -225,5 +285,7 @@ async function streamVideoProxy(req, res, next) {
 
 module.exports = {
   getProxyUrl,
-  streamVideoProxy
+  streamVideoProxy,
+  encryptToken,
+  decryptToken
 };

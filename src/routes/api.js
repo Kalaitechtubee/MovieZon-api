@@ -25,8 +25,10 @@ router.get('/v2/stream/tmdb/:tmdbId', apiController.resolveStream);
 
 // Backend-controlled sequential download pipeline.
 // The backend decides which provider to use — the frontend NEVER picks a provider for downloads.
-// Peachify (embed-only) is automatically skipped; NetMirror is always tried first.
 router.get('/v2/download/tmdb/:tmdbId', apiController.resolveDownload);
+
+// Explicit provider download (for manual user download requests)
+router.get('/v2/download/:provider/:id', apiController.explicitDownload);
 
 // Explicit provider stream (for user-initiated manual server switching).
 router.get('/v2/stream/:provider/:id', apiController.stream);
