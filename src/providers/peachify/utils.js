@@ -165,6 +165,71 @@ async function peachifyGet(url, options = {}) {
   }
 }
 
+const { dD } = require('./parser');
+
+async function scrapeDirectStream(id, type, season = 1, episode = 1) {
+  const keyHex = "a8f2a1b5e9c470814f6b2c3a5d8e7f9c1a2b3c4d5e3f7a8b8cad1e2d0a4d5c5d";
+  const engines = [
+    { label: "Iron", path: "moviebox", apis: ["https://uwu.eat-peach.sbs"] },
+    { label: "Spider", path: "holly", apis: ["https://usa.eat-peach.sbs"] },
+    { label: "Wolf", path: "air", apis: ["https://usa.eat-peach.sbs"] },
+    { label: "Multi", path: "multi", apis: ["https://usa.eat-peach.sbs"] },
+    { label: "Dark", path: "net", apis: ["https://uwu.eat-peach.sbs"] }
+  ];
+
+  const tasks = [];
+  for (const engine of engines) {
+    for (const api of engine.apis) {
+      let url = "";
+      if (type === 'tv') {
+        url = `${api}/${engine.path}/tv/${id}/${season}/${episode}`;
+      } else {
+        url = `${api}/${engine.path}/movie/${id}`;
+      }
+
+      tasks.push((async () => {
+        logger.info(`[Peachify Scraper] Querying ${engine.label} API: ${url}`);
+        try {
+          const res = await peachifyGet(url, {
+            timeout: 5000,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Referer': 'https://peachify.top/'
+            }
+          });
+
+          if (res && res.data && res.data.isEncrypted) {
+            logger.info(`[Peachify Scraper] Found encrypted data from ${engine.label}. Decrypting...`);
+            const decrypted = await dD(res.data.data, keyHex);
+            if (decrypted) {
+              const results = decrypted.results || decrypted;
+              if (results.sources || results.qualities || results.streamUrl || results.url) {
+                logger.info(`[Peachify Scraper] Successfully decrypted streams from ${engine.label}`);
+                return results;
+              }
+            }
+          } else if (res && res.data) {
+            const results = res.data.results || res.data;
+            if (results.sources || results.qualities || results.streamUrl || results.url) {
+              logger.info(`[Peachify Scraper] Found plain results from ${engine.label}`);
+              return results;
+            }
+          }
+        } catch (err) {
+          logger.warn(`[Peachify Scraper] Failed to scrape ${engine.label} via ${url}: ${err.message}`);
+        }
+        return null;
+      })());
+    }
+  }
+
+  const results = await Promise.all(tasks);
+  const validResult = results.find(r => r !== null);
+  return validResult || null;
+}
+
 module.exports = {
-  peachifyGet
+  peachifyGet,
+  scrapeDirectStream
 };
+

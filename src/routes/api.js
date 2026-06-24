@@ -27,6 +27,8 @@ router.get('/v2/stream/auto/:tmdbId', apiController.resolveStreamAuto);
 // Backend-controlled sequential download pipeline.
 // The backend decides which provider to use — the frontend NEVER picks a provider for downloads.
 router.get('/v2/download/tmdb/:tmdbId', apiController.resolveDownload);
+router.get('/v2/download/auto/:tmdbId', apiController.resolveDownloadAuto);
+router.get('/v2/download/proxy', apiController.proxyDownload);
 
 // Explicit provider download (for manual user download requests)
 router.get('/v2/download/:provider/:id', apiController.explicitDownload);

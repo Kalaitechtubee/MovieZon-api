@@ -510,6 +510,7 @@ class ProviderManager {
           id: String(tmdbId),
           serverIndex: idx + 1,
           available: isPlayable,
+          status: isPlayable ? 'ONLINE' : 'UNAVAILABLE',
           downloadSupported: provider.downloadSupported || false,
           streamType: enrichedStream.streamType || null,
           embedUrl: enrichedStream.embedUrl || null,
@@ -561,6 +562,7 @@ class ProviderManager {
             id: String(tmdbId),
             serverIndex: idx + 1,
             available: isPlayable,
+            status: isPlayable ? 'ONLINE' : 'UNAVAILABLE',
             downloadSupported: provider.downloadSupported || false,
             streamType: streamData?.streamType || null,
             embedUrl: streamData?.embedUrl || null,
@@ -572,11 +574,19 @@ class ProviderManager {
           });
         } catch (err) {
           logger.debug(`[DetailsP] ${provider.displayName} stream availability: OFFLINE — ${err.message}`);
+          const errMsg = err.message || '';
+          const is404 = errMsg.includes('404') || 
+                        errMsg.toLowerCase().includes('not found') || 
+                        errMsg.toLowerCase().includes('no playable stream') ||
+                        errMsg.toLowerCase().includes('no streams');
+          const status = is404 ? 'UNAVAILABLE' : 'OFFLINE';
+
           sourceChecks.push({
             provider: provider.name,
             id: String(tmdbId),
             serverIndex: idx + 1,
             available: false,
+            status: status,
             downloadSupported: provider.downloadSupported || false,
             streamType: null,
             embedUrl: null,
@@ -605,6 +615,7 @@ class ProviderManager {
         id: String(tmdbId),
         serverIndex: check.serverIndex,
         available: check.available,
+        status: check.status || (check.available ? 'ONLINE' : 'UNAVAILABLE'),
         downloadSupported: check.downloadSupported || false,
         languages: check.languages,
         streamType: check.streamType || null,

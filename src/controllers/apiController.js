@@ -492,6 +492,121 @@ const apiController = {
   },
 
   /**
+   * GET /api/v2/download/auto/:tmdbId?type=movie|tv&season=1&episode=1
+   */
+  async resolveDownloadAuto(req, res, next) {
+    try {
+      const { tmdbId } = req.params;
+      const { type, season, episode, variant } = req.query;
+
+      const parsedType = (type || 'movie').toLowerCase();
+      if (!['movie', 'tv'].includes(parsedType)) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'Query parameter "type" must be "movie" or "tv".'
+        });
+      }
+
+      const seasonNum = season ? parseInt(season, 10) : 1;
+      const episodeNum = episode ? parseInt(episode, 10) : 1;
+
+      if (parsedType === 'tv' && (isNaN(seasonNum) || isNaN(episodeNum))) {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'For type "tv", "season" and "episode" must be valid numbers.'
+        });
+      }
+
+      logger.info(`[ResolveDownloadAuto] TMDB ${tmdbId} (${parsedType} S${seasonNum}E${episodeNum})`);
+
+      const downloadResult = await providerManager.resolveDownload(
+        tmdbId,
+        parsedType,
+        seasonNum,
+        episodeNum,
+        variant || null
+      );
+
+      if (!downloadResult.available) {
+        return res.status(404).json({
+          ok: false,
+          success: false,
+          available: false,
+          reason: downloadResult.reason || 'No provider supports download for this title',
+          streams: []
+        });
+      }
+
+      // Fetch metadata for premium naming
+      let title = 'video';
+      try {
+        const details = await providerManager.resolveDetails(tmdbId, parsedType);
+        if (details && details.title) {
+          title = details.title;
+        }
+      } catch (e) {
+        // ignore
+      }
+      const cleanTitle = title.replace(/[^a-zA-Z0-9_\-\s]/g, '').trim();
+
+      // Secure CDN links by wrapping them in encrypted tokens
+      let secureQualities = [];
+      const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+      const host = req.get('host');
+      const proxyBase = `${protocol}://${host}/api/v2/download/proxy`;
+
+      if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
+        secureQualities = downloadResult.qualities.map(q => {
+          const extension = q.url.split('?')[0].endsWith('.m3u8') ? 'm3u8' : 'mp4';
+          const suffix = parsedType === 'tv' ? `S${seasonNum}E${episodeNum}` : '';
+          const filename = `${cleanTitle}${suffix ? '_' + suffix : ''}_${q.quality || 'auto'}.${extension}`;
+          
+          const token = playerService.encryptToken({
+            url: q.url,
+            headers: q.headers || downloadResult.headers,
+            filename
+          });
+
+          return {
+            quality: q.quality,
+            size: q.size || '1.8 GB',
+            url: `${proxyBase}?token=${encodeURIComponent(token)}`,
+            language: q.language || 'English'
+          };
+        });
+      }
+
+      res.json({
+        ok: true,
+        success: true,
+        available: true,
+        provider: downloadResult.selectedProvider,
+        downloadSupported: true,
+        languages: downloadResult.languages || [],
+        qualities: secureQualities,
+        streams: secureQualities.map(q => ({
+          quality: `${q.language || 'English'} ${q.quality}`,
+          url: q.url
+        })),
+        stream: {
+          ...downloadResult,
+          qualities: secureQualities
+        }
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /**
+   * GET /api/v2/download/proxy
+   */
+  async proxyDownload(req, res, next) {
+    req.query.download = 'true';
+    await playerService.streamVideoProxy(req, res, next);
+  },
+
+  /**
    * GET /api/v2/download/:provider/:id?type=movie|tv&season=1&episode=1
    */
   async explicitDownload(req, res, next) {
@@ -562,7 +677,7 @@ const apiController = {
       let secureQualities = [];
       const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
       const host = req.get('host');
-      const proxyBase = `${protocol}://${host}/api/v2/stream/proxy`;
+      const proxyBase = `${protocol}://${host}/api/v2/download/proxy`;
 
       if (downloadResult.qualities && Array.isArray(downloadResult.qualities)) {
         secureQualities = downloadResult.qualities.map(q => {
@@ -578,7 +693,9 @@ const apiController = {
 
           return {
             quality: q.quality,
-            url: `${proxyBase}?token=${encodeURIComponent(token)}&download=true`
+            size: q.size || '1.8 GB',
+            url: `${proxyBase}?token=${encodeURIComponent(token)}`,
+            language: q.language || 'English'
           };
         });
       }
@@ -590,7 +707,13 @@ const apiController = {
         provider: provider.toLowerCase(),
         selectedProvider: provider.toLowerCase(),
         subjectId: String(id),
-        streams: secureQualities,
+        downloadSupported: true,
+        languages: downloadResult.languages || [],
+        qualities: secureQualities,
+        streams: secureQualities.map(q => ({
+          quality: `${q.language || 'English'} ${q.quality}`,
+          url: q.url
+        })),
         stream: {
           ...downloadResult,
           qualities: secureQualities
@@ -606,15 +729,18 @@ const apiController = {
    */
   async providers(req, res, next) {
     try {
-      const list = providerManager.getProviders().map(p => ({
-        name: p.name,
-        displayName: p.displayName,
-        priority: p.priority,
-        status: 'healthy',
-        message: 'Operational',
-        responseTimeMs: 0,
-        lastChecked: new Date()
-      }));
+      const list = providerManager.getProviders().map(p => {
+        const diag = providerManager.providerDiagnostics.get(p.name) || {};
+        return {
+          name: p.name,
+          displayName: p.displayName,
+          priority: p.priority,
+          status: diag.online ? 'healthy' : 'unhealthy',
+          message: diag.error || 'Operational',
+          responseTimeMs: diag.latency || 0,
+          lastChecked: diag.lastSuccess || new Date()
+        };
+      });
 
       res.json({
         ok: true,
@@ -632,19 +758,17 @@ const apiController = {
     const uptime = process.uptime();
     const memory = process.memoryUsage();
     
-    // Check registered providers health
-    const providers = providerManager.getProviders();
     const providersHealth = {};
-    for (const p of providers) {
-      const pInstance = providerManager.get(p.name);
-      if (pInstance) {
-        try {
-          const h = await pInstance.health();
-          providersHealth[p.name] = h;
-        } catch (e) {
-          providersHealth[p.name] = { status: 'unhealthy', message: e.message };
-        }
-      }
+    const diags = providerManager.providerDiagnostics;
+    for (const [name, diag] of diags.entries()) {
+      providersHealth[name] = {
+        status: diag.online ? 'healthy' : 'unhealthy',
+        message: diag.error || 'Operational',
+        responseTimeMs: diag.latency,
+        lastSuccess: diag.lastSuccess,
+        downloadSupported: diag.downloadSupported,
+        streamSupported: diag.streamSupported
+      };
     }
 
     const isDegraded = Object.values(providersHealth).some(h => h.status === 'unhealthy');

@@ -1,10 +1,15 @@
 const BaseProvider = require('../BaseProvider');
-const { normalizeStream } = require('../../utils/normalizer');
-const logger = require('../../logger');
+const axios = require('axios');
+const stream = require('./stream');
+const download = require('./download');
 
 class VidSrcProvider extends BaseProvider {
   constructor() {
     super('vidsrc');
+  }
+
+  get downloadSupported() {
+    return false;
   }
 
   async search(query) {
@@ -15,43 +20,39 @@ class VidSrcProvider extends BaseProvider {
     return null;
   }
 
-  async stream(id, type = 'movie', season = 1, episode = 1, variantId = null, clientIp = null) {
-    logger.debug(`[VidSrc] stream() called for ID: ${id}, Type: ${type}, S${season}E${episode}`);
-    
-    const embedUrl = type === 'tv'
-      ? `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`
-      : `https://vidsrc.to/embed/movie/${id}`;
+  async exists(id, type) {
+    return true;
+  }
 
-    return normalizeStream({
-      provider: 'vidsrc',
-      drm: false,
-      streamUrl: '',
-      embedUrl,
-      embedFallbacks: [embedUrl],
-      streamType: 'embed',
-      subtitles: [],
-      headers: {},
-      qualities: [],
-      variants: [],
-      expires: null
-    }, 'vidsrc');
+  async stream(id, type = 'movie', season = 1, episode = 1, variantId = null, clientIp = null) {
+    return await stream(id, type, season, episode, variantId, clientIp);
+  }
+
+  async download(id, type, season = 1, episode = 1, variantId = null) {
+    return await download(id, type, season, episode, variantId);
   }
 
   async health() {
     const startTime = Date.now();
     try {
-      const res = await fetch('https://vidsrc.to', { timeout: 3000 });
+      const res = await axios.get('https://vidsrcme.su', {
+        timeout: 4000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': 'https://vidsrcme.su'
+        }
+      });
       const duration = Date.now() - startTime;
       return { 
-        status: res.ok || res.status < 500 ? 'healthy' : 'unhealthy', 
+        status: 'healthy', 
         message: 'VidSrc reachable', 
         responseTimeMs: duration 
       };
     } catch (err) {
       const duration = Date.now() - startTime;
       return { 
-        status: 'unhealthy', 
-        message: `VidSrc unreachable: ${err.message}`, 
+        status: 'degraded', 
+        message: `VidSrc degraded: ${err.message}`, 
         responseTimeMs: duration 
       };
     }

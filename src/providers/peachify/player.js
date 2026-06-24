@@ -18,14 +18,14 @@ function getEmbedUrl(id, type, season = 1, episode = 1) {
   const fallbackEmbeds = [embedUrl];
   if (mediaType === 'tv') {
     fallbackEmbeds.push(
-      `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
-      `https://autoembed.cc/tv/${id}-${season}-${episode}`,
+      `https://vidsrcme.su/embed/tv/${id}/${season}/${episode}`,
+      `https://autoembed.co/tv/tmdb/${id}-${season}-${episode}`,
       `https://embed.su/embed/tv/${id}/${season}/${episode}`
     );
   } else {
     fallbackEmbeds.push(
-      `https://vidsrc.to/embed/movie/${id}`,
-      `https://autoembed.cc/movie/${id}`,
+      `https://vidsrcme.su/embed/movie/${id}`,
+      `https://autoembed.co/movie/tmdb/${id}`,
       `https://embed.su/embed/movie/${id}`
     );
   }

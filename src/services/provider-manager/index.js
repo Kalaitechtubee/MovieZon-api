@@ -61,6 +61,61 @@ class ProviderManager {
     // Register VidSrc
     const vidsrc = new VidSrcProvider();
     this.providers.set(vidsrc.name, vidsrc);
+
+    // Initialize diagnostics
+    this.providerDiagnostics = new Map();
+    for (const [name, provider] of this.providers.entries()) {
+      this.providerDiagnostics.set(name, {
+        online: true,
+        movieAvailable: false,
+        streamSupported: true,
+        downloadSupported: provider.downloadSupported,
+        latency: 0,
+        lastSuccess: null,
+        error: null
+      });
+    }
+
+    // Run health check immediately and start the scheduler
+    this.runHealthChecks();
+    this.healthInterval = setInterval(() => this.runHealthChecks(), 300000);
+  }
+
+  stopHealthMonitor() {
+    if (this.healthInterval) {
+      clearInterval(this.healthInterval);
+    }
+  }
+
+  async runHealthChecks() {
+    logger.info('[HealthMonitor] Running scheduled provider health checks...');
+    for (const [name, provider] of this.providers.entries()) {
+      const startTime = Date.now();
+      try {
+        const health = await provider.health();
+        const latency = Date.now() - startTime;
+        
+        const isHealthy = health && health.status !== 'unhealthy';
+        const diag = this.providerDiagnostics.get(name) || {};
+        
+        this.providerDiagnostics.set(name, {
+          ...diag,
+          online: isHealthy,
+          latency: latency,
+          error: isHealthy ? null : (health.message || 'Unhealthy status')
+        });
+      } catch (err) {
+        const latency = Date.now() - startTime;
+        const diag = this.providerDiagnostics.get(name) || {};
+        
+        this.providerDiagnostics.set(name, {
+          ...diag,
+          online: false,
+          latency: latency,
+          error: err.message
+        });
+      }
+    }
   }
 
   /**
@@ -88,7 +143,6 @@ class ProviderManager {
       return a.name.localeCompare(b.name);
     });
   }
-
 
   /**
    * Get provider by name
@@ -141,6 +195,7 @@ class ProviderManager {
       let providerPlayable = false;
       let providerEmbedUrl = null;
       let providerEmbedFallbacks = [];
+      let status = 'ONLINE';
 
       try {
         const streamData = await provider.stream(tmdbId, type, 1, 1);
@@ -154,9 +209,17 @@ class ProviderManager {
             primaryEmbedUrl = providerEmbedUrl;
             primaryEmbedFallbacks = providerEmbedFallbacks;
           }
+        } else {
+          status = 'UNAVAILABLE';
         }
       } catch (err) {
         logger.warn(`[DetailsP] ${provider.displayName} availability check failed: ${err.message}`);
+        const errMsg = err.message || '';
+        const is404 = errMsg.includes('404') || 
+                      errMsg.toLowerCase().includes('not found') || 
+                      errMsg.toLowerCase().includes('no playable stream') ||
+                      errMsg.toLowerCase().includes('no streams');
+        status = is404 ? 'UNAVAILABLE' : 'OFFLINE';
       }
 
       sources.push({
@@ -165,6 +228,7 @@ class ProviderManager {
         id: String(tmdbId),
         serverIndex: idx + 1,
         available: providerPlayable,
+        status: status,
         downloadSupported: provider.downloadSupported,
         languages: audioLangs,
         streamType: provider.name === 'peachify' ? 'embed' : 'hls',
@@ -241,7 +305,7 @@ class ProviderManager {
 
     logger.info(`[Pipeline] Sequential stream resolution for TMDB ${tmdbId}`);
     const sortedProviders = this.getSortedProviders();
-    const lastSuccessProviderCacheKey = `last_success_provider:${tmdbId}`;
+    const lastSuccessProviderCacheKey = `last_success_stream_provider:${tmdbId}`;
     const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
 
     let providersToTry = [...sortedProviders];
@@ -254,23 +318,22 @@ class ProviderManager {
       }
     }
 
-    const errors = [];
+    const startMs = Date.now();
+    let selectedProvider = null;
+    let fallbackCount = 0;
 
     for (const provider of providersToTry) {
       // Check health status to skip if offline
-      try {
-        const health = await provider.health();
-        if (health && health.status === 'unhealthy') {
-          logger.info(`[Pipeline] Skipping offline provider: ${provider.displayName}`);
-          continue;
-        }
-      } catch (healthErr) {
-        // ignore health check issues
+      const diag = this.providerDiagnostics.get(provider.name);
+      if (diag && !diag.online) {
+        logger.info(`[Pipeline] Skipping offline provider: ${provider.displayName}`);
+        continue;
       }
 
       let attempts = 0;
       let success = false;
       let streamData = null;
+      const providerStart = Date.now();
 
       while (attempts < 2 && !success) {
         attempts++;
@@ -283,7 +346,15 @@ class ProviderManager {
         } catch (err) {
           logger.error(`[Pipeline] ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
           if (attempts >= 2) {
-            errors.push(`${provider.name}: ${err.message}`);
+            const latency = Date.now() - providerStart;
+            logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Streaming | Status: Failure | Reason: ${err.message} | Latency: ${latency}ms`);
+            
+            const diagState = this.providerDiagnostics.get(provider.name) || {};
+            this.providerDiagnostics.set(provider.name, {
+              ...diagState,
+              latency,
+              error: err.message
+            });
           } else {
             // Delay 500ms before retry
             await new Promise(resolve => setTimeout(resolve, 500));
@@ -292,22 +363,40 @@ class ProviderManager {
       }
 
       if (success && streamData) {
+        const latency = Date.now() - providerStart;
+        logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Streaming | Status: Success | Latency: ${latency}ms`);
+        
+        const diagState = this.providerDiagnostics.get(provider.name) || {};
+        this.providerDiagnostics.set(provider.name, {
+          ...diagState,
+          movieAvailable: true,
+          latency,
+          lastSuccess: new Date(),
+          error: null
+        });
+
+        selectedProvider = provider.name;
         const resolvedResult = {
           ...streamData,
           selectedProvider: provider.name,
           available: true,
-          fallbackTriggered: errors.length > 0
+          fallbackTriggered: fallbackCount > 0
         };
 
-        cache.set(pipelineCacheKey, resolvedResult, 1800);
-        cache.set(lastSuccessProviderCacheKey, provider.name, 1800);
+        cache.set(pipelineCacheKey, resolvedResult, 900);
+        cache.set(lastSuccessProviderCacheKey, provider.name, 900);
+
+        const totalMs = Date.now() - startMs;
+        logger.info(`[Pipeline Log] Selected Stream Provider: ${provider.displayName} | Fallback Count: ${fallbackCount} | Total Latency: ${totalMs}ms`);
         return resolvedResult;
+      } else {
+        fallbackCount++;
       }
     }
 
     return {
       available: false,
-      reason: `All providers failed: ${errors.join(', ')}`
+      reason: `All providers failed.`
     };
   }
 
@@ -315,10 +404,17 @@ class ProviderManager {
    * Download stream pipeline.
    */
   async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
+    const pipelineCacheKey = `pipeline:download:${type}:${tmdbId}:${season}:${episode}:${variantId || 'default'}`;
+    const cachedResult = cache.get(pipelineCacheKey);
+    if (cachedResult) {
+      logger.info(`[DownloadP] Cache HIT for TMDB ${tmdbId}`);
+      return cachedResult;
+    }
+
     logger.info(`[DownloadP] Sequential download resolution for TMDB ${tmdbId}`);
     
     const sortedProviders = this.getSortedProviders();
-    const lastSuccessProviderCacheKey = `last_success_provider:${tmdbId}`;
+    const lastSuccessProviderCacheKey = `last_success_download_provider:${tmdbId}`;
     const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
 
     let providersToTry = [...sortedProviders];
@@ -330,34 +426,46 @@ class ProviderManager {
       }
     }
 
-    const errors = [];
+    const startMs = Date.now();
+    let selectedProvider = null;
+    let fallbackCount = 0;
 
     for (const provider of providersToTry) {
       // Check health status to skip if offline
-      try {
-        const health = await provider.health();
-        if (health && health.status === 'unhealthy') {
-          continue;
-        }
-      } catch (healthErr) {
-        // ignore
+      const diag = this.providerDiagnostics.get(provider.name);
+      if (diag && !diag.online) {
+        logger.info(`[DownloadP] Skipping offline provider: ${provider.displayName}`);
+        continue;
       }
 
       let attempts = 0;
       let success = false;
       let downloadData = null;
+      const providerStart = Date.now();
 
       while (attempts < 2 && !success) {
         attempts++;
         try {
           downloadData = await provider.download(tmdbId, type, season, episode, variantId);
-          if (downloadData && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
+          if (downloadData && downloadData.success && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
             success = true;
+          } else {
+            const latency = Date.now() - providerStart;
+            logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Failure | Reason: Unsupported or no streams | Latency: ${latency}ms`);
+            break;
           }
         } catch (err) {
           logger.warn(`[DownloadP] Provider ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
           if (attempts >= 2) {
-            errors.push(`${provider.name}: ${err.message}`);
+            const latency = Date.now() - providerStart;
+            logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Failure | Reason: ${err.message} | Latency: ${latency}ms`);
+            
+            const diagState = this.providerDiagnostics.get(provider.name) || {};
+            this.providerDiagnostics.set(provider.name, {
+              ...diagState,
+              latency,
+              error: err.message
+            });
           } else {
             await new Promise(resolve => setTimeout(resolve, 500));
           }
@@ -365,21 +473,43 @@ class ProviderManager {
       }
 
       if (success && downloadData) {
-        logger.info(`[DownloadP] Successfully resolved download using provider: ${provider.displayName}`);
-        return {
+        const latency = Date.now() - providerStart;
+        logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Success | Latency: ${latency}ms`);
+        
+        const diagState = this.providerDiagnostics.get(provider.name) || {};
+        this.providerDiagnostics.set(provider.name, {
+          ...diagState,
+          movieAvailable: true,
+          latency,
+          lastSuccess: new Date(),
+          error: null
+        });
+
+        selectedProvider = provider.name;
+        const resolvedResult = {
           ...downloadData,
           selectedProvider: provider.name,
-          available: true
+          available: true,
+          fallbackTriggered: fallbackCount > 0
         };
+
+        cache.set(pipelineCacheKey, resolvedResult, 900);
+        cache.set(lastSuccessProviderCacheKey, provider.name, 900);
+
+        const totalMs = Date.now() - startMs;
+        logger.info(`[Pipeline Log] Selected Download Provider: ${provider.displayName} | Fallback Count: ${fallbackCount} | Total Latency: ${totalMs}ms`);
+        return resolvedResult;
+      } else {
+        fallbackCount++;
       }
     }
 
     return {
+      success: false,
       available: false,
-      reason: `No provider supports direct download for this title: ${errors.join(', ')}`
+      reason: 'No provider supports direct download for this title.'
     };
   }
-
 }
 
 module.exports = new ProviderManager();
