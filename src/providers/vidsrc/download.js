@@ -2,6 +2,12 @@ const axios = require('axios');
 const logger = require('../../logger');
 const config = require('../../config');
 
+const DEFAULT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://vidsrc-embed.ru/',
+  'Origin': 'https://vidsrc-embed.ru'
+};
+
 async function vidsrcGet(url, options = {}) {
   try {
     return await axios.get(url, { ...options, timeout: options.timeout || 8000 });
@@ -21,12 +27,6 @@ async function vidsrcGet(url, options = {}) {
     }
   }
 }
-
-const DEFAULT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Referer': 'https://vidsrc-embed.ru/',
-  'Origin': 'https://vidsrc-embed.ru'
-};
 
 function estimateSize(quality) {
   const q = String(quality).toLowerCase();

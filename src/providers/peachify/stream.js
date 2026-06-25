@@ -6,10 +6,34 @@ const { scrapeDirectStream } = require('./utils');
 module.exports = async function stream(id, type = 'movie', season = 1, episode = 1, variantId = null, clientIp = null) {
   logger.debug(`[Peachify Stream] stream() called for ID: ${id}, Type: ${type}, S${season}E${episode}`);
   
-  // Check if the stream actually exists on Peachify
-  const directData = await scrapeDirectStream(id, type, season, episode);
+  // Attempt to get direct stream data from Peachify scraper APIs.
+  // In production (Render), these may be blocked by Cloudflare (403).
+  // In that case, we still return the embed URL so the iframe player works.
+  let directData = null;
+  try {
+    directData = await scrapeDirectStream(id, type, season, episode);
+  } catch (scrapeErr) {
+    logger.warn(`[Peachify Stream] scrapeDirectStream failed (will use embed fallback): ${scrapeErr.message}`);
+  }
+  
+  // Graceful embed fallback — Peachify iframe works independently of our scraper
   if (!directData) {
-    throw new Error(`Media not found on Peachify.`);
+    logger.info(`[Peachify Stream] No direct data resolved; returning embed URL for TMDB ${id}`);
+    const embedInfo = getEmbedUrl(id, type, season, episode);
+    return normalizeStream({
+      provider: 'peachify',
+      drm: false,
+      streamUrl: '',
+      embedUrl: embedInfo.embedUrl,
+      embedFallbacks: [...embedInfo.embedFallbacks],
+      streamType: 'embed',
+      subtitles: [],
+      headers: {},
+      qualities: [],
+      variants: [],
+      selectedVariantId: null,
+      expires: null
+    }, 'peachify');
   }
 
   // Extract audio variants (dubs) from decrypted Peachify streams

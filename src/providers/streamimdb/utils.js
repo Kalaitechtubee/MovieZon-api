@@ -1,6 +1,7 @@
 const axios = require('axios');
 const logger = require('../../logger');
 const { URL } = require('url');
+const config = require('../../config');
 
 const DEFAULT_HEADERS = {
   'Referer': 'https://nextgencloudfabric.com/',
@@ -10,7 +11,7 @@ const DEFAULT_HEADERS = {
 };
 
 /**
- * Fetch helper for streamdata API
+ * Fetch helper for streamdata API with Cloudflare Worker proxy fallback.
  */
 async function streamimdbGet(url, options = {}) {
   const reqHeaders = {
@@ -18,11 +19,24 @@ async function streamimdbGet(url, options = {}) {
     ...(options.headers || {})
   };
   
-  return await axios.get(url, {
-    ...options,
-    headers: reqHeaders,
-    timeout: options.timeout || 6000
-  });
+  try {
+    return await axios.get(url, {
+      ...options,
+      headers: reqHeaders,
+      timeout: options.timeout || 6000
+    });
+  } catch (err) {
+    logger.warn(`[StreamIMDb] Direct request failed for ${url}: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+    const proxyUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(JSON.stringify(reqHeaders))}`;
+    try {
+      const res = await axios.get(proxyUrl, { timeout: (options.timeout || 6000) + 2000 });
+      logger.info(`[StreamIMDb Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
+      return res;
+    } catch (proxyErr) {
+      logger.error(`[StreamIMDb Proxy] Cloudflare Worker proxy also failed: ${proxyErr.message}`);
+      throw err; // throw original error
+    }
+  }
 }
 
 /**

@@ -7,19 +7,19 @@
       "type": "movie",
       "posterPath": "https://image.tmdb.org/t/p/w500/4KZXlZ5tTT6ghbW77gS4hSLkCd7.jpg"
     },
-    "progress": 0,
-    "duration": 0,
-    "updatedAt": 1782381904656,
+    "progress": 0.468719,
+    "duration": 9141.174000000003,
+    "updatedAt": 1782382569379,
     "playContext": {
-      "provider": "tmdb",
+      "provider": "streamimdb",
       "id": "1367220"
     },
     "tmdbId": 1367220,
-    "provider": "tmdb",
-    "position": 0,
+    "provider": "streamimdb",
+    "position": 0.468719,
     "season": null,
     "episode": null,
-    "lastWatched": 1782381904656
+    "lastWatched": 1782382569379
   },
   {
     "movie": {

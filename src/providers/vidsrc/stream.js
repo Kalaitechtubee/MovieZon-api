@@ -3,6 +3,12 @@ const logger = require('../../logger');
 const { normalizeStream } = require('../../utils/normalizer');
 const config = require('../../config');
 
+const DEFAULT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://vidsrc-embed.ru/',
+  'Origin': 'https://vidsrc-embed.ru'
+};
+
 async function vidsrcGet(url, options = {}) {
   try {
     return await axios.get(url, { ...options, timeout: options.timeout || 7000 });
@@ -22,13 +28,6 @@ async function vidsrcGet(url, options = {}) {
     }
   }
 }
-
-
-const DEFAULT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Referer': 'https://vidsrc-embed.ru/',
-  'Origin': 'https://vidsrc-embed.ru'
-};
 
 /**
  * Build embed URLs for VidSrc using documented API format:
