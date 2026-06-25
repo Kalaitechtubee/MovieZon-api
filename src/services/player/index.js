@@ -4,7 +4,8 @@ const crypto = require('crypto');
 const config = require('../../config');
 
 // Session secret key generated at startup for securing tokens
-const PROXY_TOKEN_SECRET = process.env.PROXY_TOKEN_SECRET || crypto.randomBytes(32);
+const rawSecret = process.env.PROXY_TOKEN_SECRET || 'moviezon_stable_fallback_secret_key_2026';
+const PROXY_TOKEN_SECRET = crypto.createHash('sha256').update(rawSecret).digest();
 const IV_LENGTH = 16;
 
 /**
