@@ -7,6 +7,7 @@ const config = {
   isDev: (process.env.NODE_ENV || 'development') === 'development' && !process.env.RENDER,
   cacheTtl: parseInt(process.env.CACHE_TTL, 10) || 3600,
   proxyUrl: process.env.PROXY_URL || null,
+  workerProxyUrl: process.env.WORKER_PROXY_URL || 'https://streamhub-proxy.1545zoya.workers.dev',
   
   // Providers config — order defines the deterministic resolution pipeline.
   // Provider 1 (index 0) is always tried first. Fallback proceeds in order.

@@ -1,6 +1,28 @@
 const axios = require('axios');
 const logger = require('../../logger');
 const { normalizeStream } = require('../../utils/normalizer');
+const config = require('../../config');
+
+async function vidsrcGet(url, options = {}) {
+  try {
+    return await axios.get(url, { ...options, timeout: options.timeout || 7000 });
+  } catch (err) {
+    logger.warn(`[VidSrc] Direct request failed for ${url}: ${err.message}. Retrying via Cloudflare Worker proxy...`);
+    const headersToForward = options.headers
+      ? JSON.stringify(options.headers)
+      : JSON.stringify(DEFAULT_HEADERS);
+    const proxyUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
+    try {
+      const res = await axios.get(proxyUrl, { timeout: options.timeout || 8000 });
+      logger.info(`[VidSrc Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
+      return res;
+    } catch (proxyErr) {
+      logger.error(`[VidSrc Proxy] Cloudflare Worker proxy request also failed: ${proxyErr.message}`);
+      throw err; // throw original error
+    }
+  }
+}
+
 
 const DEFAULT_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -72,7 +94,7 @@ async function resolveDirectStream(id, type, season, episode) {
   for (const api of apisToTry) {
     try {
       logger.info(`[VidSrc Stream] Trying direct API: ${api.url}`);
-      const res = await axios.get(api.url, { headers: api.headers, timeout: 7000 });
+      const res = await vidsrcGet(api.url, { headers: api.headers, timeout: 7000 });
       const data = res.data;
 
       if (data && (data.url || data.stream_url || data.hls)) {

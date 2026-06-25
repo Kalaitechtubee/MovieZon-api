@@ -153,7 +153,7 @@ async function peachifyGet(url, options = {}) {
         'Origin': 'https://peachify.top',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       });
-  const proxyUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
+  const proxyUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
   try {
     const res = await axios.get(proxyUrl, { timeout: options.timeout || 8000 });
     logger.info(`[Peachify Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);

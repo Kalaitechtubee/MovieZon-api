@@ -1,6 +1,7 @@
 const axios = require('axios');
 const logger = require('../../logger');
 const crypto = require('crypto');
+const config = require('../../config');
 
 // Session secret key generated at startup for securing tokens
 const PROXY_TOKEN_SECRET = process.env.PROXY_TOKEN_SECRET || crypto.randomBytes(32);
@@ -122,7 +123,7 @@ async function streamVideoProxy(req, res, next) {
       targetUrl.includes('/subtitle/');
 
     if (!isDownload && !isSubtitle && targetHost.endsWith('hakunaymatata.com') && !targetHost.includes('streamhub-proxy') && !targetHost.includes('workers.dev')) {
-      targetUrl = `https://streamhub-proxy.1545zoya.workers.dev/?url=${encodeURIComponent(targetUrl)}`;
+      targetUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(targetUrl)}`;
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
     }
 
