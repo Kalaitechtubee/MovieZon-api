@@ -127,10 +127,7 @@ async function streamVideoProxy(req, res, next) {
       logger.debug(`[ProxyStream] Redirecting direct CDN link to Cloudflare Worker proxy: ${targetUrl}`);
     }
 
-    // Set attachment header for direct download trigger without navigation
-    if (isDownload) {
-      res.setHeader('Content-Disposition', `attachment; filename="${targetFilename}"`);
-    }
+    // Content-Disposition will be set below, after we know whether it is HLS or a plain file.
 
     const headers = {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -184,6 +181,137 @@ async function streamVideoProxy(req, res, next) {
       targetUrl.includes('hls-proxy') ||
       targetUrl.includes('m3u8') ||
       targetUrl.includes('/hls/');
+
+    // ─── HLS Download: concatenate .ts segments into a single streamable file ──
+    // When the resolved download URL is an HLS variant playlist (e.g. from
+    // StreamIMDb), we fetch every segment and pipe them concatenated as
+    // video/mp2t so the browser saves a real video file instead of a text
+    // playlist. Streaming (non-download) flow is completely unchanged.
+    if (isDownload && isM3u8Url) {
+      logger.info(`[ProxyDownload] HLS download detected. Fetching variant playlist to concatenate segments: ${targetUrl}`);
+      let downloadHandled = false;
+      try {
+        const plRes = await axios({
+          method: 'get',
+          url: targetUrl,
+          headers,
+          responseType: 'text',
+          timeout: 15000,
+          validateStatus: false
+        });
+
+        let playlistText = typeof plRes.data === 'string' ? plRes.data : '';
+        let currentPlaylistUrl = targetUrl;
+
+        // If it is a master playlist, parse and fetch the best variant playlist
+        if (playlistText.includes('#EXT-X-STREAM-INF:')) {
+          logger.info(`[ProxyDownload] Master playlist detected. Finding best quality variant...`);
+          const lines = playlistText.split(/\r?\n/);
+          const variants = [];
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.startsWith('#EXT-X-STREAM-INF:')) {
+              let width = 0, height = 0, bandwidth = 0;
+              const resMatch = line.match(/RESOLUTION=(\d+)x(\d+)/i);
+              if (resMatch) {
+                width = parseInt(resMatch[1], 10);
+                height = parseInt(resMatch[2], 10);
+              }
+              const bwMatch = line.match(/BANDWIDTH=(\d+)/i);
+              if (bwMatch) {
+                bandwidth = parseInt(bwMatch[1], 10);
+              }
+
+              const nextLine = lines[i + 1]?.trim();
+              if (nextLine && !nextLine.startsWith('#')) {
+                try {
+                  const variantUrl = new URL(nextLine, currentPlaylistUrl).toString();
+                  variants.push({ width, height, bandwidth, url: variantUrl });
+                } catch (_) {}
+              }
+            }
+          }
+
+          if (variants.length > 0) {
+            // Sort variants by height desc, then bandwidth desc
+            variants.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
+            const bestVariant = variants[0];
+            logger.info(`[ProxyDownload] Selected best variant: ${bestVariant.width}x${bestVariant.height} (${bestVariant.bandwidth} bps) -> ${bestVariant.url}`);
+
+            const varRes = await axios({
+              method: 'get',
+              url: bestVariant.url,
+              headers,
+              responseType: 'text',
+              timeout: 15000,
+              validateStatus: false
+            });
+
+            if (typeof varRes.data === 'string') {
+              playlistText = varRes.data;
+              currentPlaylistUrl = bestVariant.url;
+            } else {
+              throw new Error('Failed to fetch variant playlist data');
+            }
+          }
+        }
+
+        // Collect every non-comment line — these are segment URLs
+        const segmentUrls = playlistText
+          .split(/\r?\n/)
+          .map(l => l.trim())
+          .filter(l => l && !l.startsWith('#'))
+          .map(l => {
+            try { return new URL(l, currentPlaylistUrl).toString(); } catch (_) { return null; }
+          })
+          .filter(Boolean);
+
+        if (segmentUrls.length > 0) {
+          logger.info(`[ProxyDownload] Variant playlist has ${segmentUrls.length} segment(s). Streaming concatenated .ts file.`);
+          const tsFilename = targetFilename.replace(/\.m3u8$/i, '.ts');
+          res.setHeader('Content-Disposition', `attachment; filename="${tsFilename}"`);
+          res.setHeader('Content-Type', 'video/mp2t');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges, Content-Disposition');
+          res.status(200);
+
+          for (const segUrl of segmentUrls) {
+            if (res.writableEnded) break;
+            try {
+              const segRes = await axios({
+                method: 'get',
+                url: segUrl,
+                headers,
+                responseType: 'arraybuffer',
+                timeout: 30000,
+                validateStatus: false
+              });
+              if ((segRes.status === 200 || segRes.status === 206) && segRes.data) {
+                res.write(Buffer.from(segRes.data));
+              }
+            } catch (segErr) {
+              logger.warn(`[ProxyDownload] Segment fetch failed (${segUrl}): ${segErr.message}`);
+            }
+          }
+
+          if (!res.writableEnded) res.end();
+          downloadHandled = true;
+        } else {
+          logger.warn(`[ProxyDownload] No segments found in playlist. Falling back to m3u8 file download.`);
+        }
+      } catch (hlsErr) {
+        logger.warn(`[ProxyDownload] HLS segment concatenation failed: ${hlsErr.message}. Falling back to m3u8 file download.`);
+      }
+
+      if (downloadHandled) return;
+      // Fallthrough: master playlist or error → serve m3u8 as attachment (existing behaviour)
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Set attachment header for direct (non-HLS) download
+    if (isDownload) {
+      res.setHeader('Content-Disposition', `attachment; filename="${targetFilename}"`);
+    }
 
     if (isM3u8Url) {
       logger.info(`[ProxyStream] Detected HLS playlist. Fetching and rewriting URLs for: ${targetUrl}`);
