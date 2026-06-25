@@ -8,8 +8,10 @@ class VidSrcProvider extends BaseProvider {
     super('vidsrc');
   }
 
+  // VidSrc attempts direct stream extraction — if it gets an HLS URL, download is supported.
+  // We mark this true so the download pipeline tries; download.js returns false internally if unavailable.
   get downloadSupported() {
-    return false;
+    return true;
   }
 
   async search(query) {
@@ -35,25 +37,30 @@ class VidSrcProvider extends BaseProvider {
   async health() {
     const startTime = Date.now();
     try {
-      const res = await axios.get('https://vidsrcme.su', {
-        timeout: 4000,
+      const res = await axios.get('https://vidsrc-embed.ru', {
+        timeout: 5000,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Referer': 'https://vidsrcme.su'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Referer': 'https://vidsrc-embed.ru'
         }
       });
       const duration = Date.now() - startTime;
-      return { 
-        status: 'healthy', 
-        message: 'VidSrc reachable', 
-        responseTimeMs: duration 
+      // Embed providers are always considered at least degraded (not unhealthy)
+      // since the embed resolves client-side even if the server can't reach it directly.
+      const httpOk = res.status >= 200 && res.status < 400;
+      return {
+        status: httpOk ? 'healthy' : 'degraded',
+        message: httpOk ? 'VidSrc reachable' : `VidSrc returned status ${res.status}`,
+        responseTimeMs: duration
       };
     } catch (err) {
       const duration = Date.now() - startTime;
-      return { 
-        status: 'degraded', 
-        message: `VidSrc degraded: ${err.message}`, 
-        responseTimeMs: duration 
+      // Always return 'degraded' (not 'unhealthy') for embed providers so the pipeline
+      // doesn't skip them — embed URLs resolve in the browser, not the backend.
+      return {
+        status: 'degraded',
+        message: `VidSrc degraded: ${err.message}`,
+        responseTimeMs: duration
       };
     }
   }

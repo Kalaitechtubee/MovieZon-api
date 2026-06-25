@@ -84,7 +84,7 @@ async function runTests() {
     await assertResponse('GET /api/v2/stream/streamimdb/1399 S1E1', async () => {
       const res = await axios.get(`${baseUrl}/v2/stream/streamimdb/1399?type=tv&season=1&episode=1`);
       const data = res.data;
-      if (!data.success || data.provider !== 'streamimdb' || !Array.isArray(data.streams)) {
+      if (!data.success || data.provider !== 'streamimdb' || !Array.isArray(data.streams) || data.streams.length === 0) {
         throw new Error('Invalid StreamIMDb stream response structure.');
       }
       console.log(`StreamIMDb stream qualities count: ${data.streams.length}`);
@@ -155,18 +155,14 @@ async function runTests() {
       }
     });
 
-    // 10. VidSrc Download (should be unsupported)
-    await assertResponse('GET /api/v2/download/vidsrc/28322 (Expected Failure/Unsupported)', async () => {
-      try {
-        await axios.get(`${baseUrl}/v2/download/vidsrc/28322?type=movie`);
-        throw new Error('Expected 404/failure for unsupported download provider.');
-      } catch (err) {
-        if (err.response && err.response.status === 404) {
-          console.log('Correctly returned 404 for unsupported VidSrc download.');
-        } else {
-          throw err;
-        }
+    // 10. VidSrc Download (should succeed via fallback)
+    await assertResponse('GET /api/v2/download/vidsrc/28322', async () => {
+      const res = await axios.get(`${baseUrl}/v2/download/vidsrc/28322?type=movie`);
+      const data = res.data;
+      if (!data.success || !data.downloadSupported || !Array.isArray(data.languages) || !Array.isArray(data.qualities)) {
+        throw new Error('Invalid VidSrc download response structure.');
       }
+      console.log(`VidSrc Download resolved via fallback provider. Languages: ${JSON.stringify(data.languages)}, qualities count: ${data.qualities.length}`);
     });
 
     // 11. Unified /api/v2/stream/auto/:tmdbId

@@ -50,9 +50,10 @@ class AutoEmbedProvider extends BaseProvider {
       };
     } catch (err) {
       const duration = Date.now() - startTime;
+      // Always 'degraded' (not 'unhealthy') — embed URLs resolve client-side
       return { 
         status: 'degraded', 
-        message: `AutoEmbed degraded: ${err.message}`, 
+        message: `AutoEmbed unreachable from server (embed still works client-side): ${err.message}`, 
         responseTimeMs: duration 
       };
     }

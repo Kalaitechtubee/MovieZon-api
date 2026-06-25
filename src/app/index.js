@@ -10,6 +10,9 @@ const apiController = require('../controllers/apiController');
 
 const app = express();
 
+// Disable ETag generation to prevent caching of dynamic/short-lived stream URLs
+app.disable('etag');
+
 // Security Middlewares
 // Disable Helmet contentSecurityPolicy if we are loading remote videos, or adjust it
 app.use(

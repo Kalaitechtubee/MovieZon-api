@@ -77,6 +77,7 @@ function normalizeStream(data, providerName) {
     qualities,
     expires: data.expires ? parseInt(data.expires, 10) : null,
     variants: data.variants || [],
+    selectedVariantId: data.selectedVariantId || null,
     streamType: data.streamType || null,
     embedUrl: data.embedUrl || null,
     embedFallbacks: data.embedFallbacks || []

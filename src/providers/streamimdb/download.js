@@ -31,7 +31,23 @@ module.exports = async function download(id, type, season = 1, episode = 1, vari
       throw new Error('API returned no playable stream URLs');
     }
 
-    const streamUrl = streamUrls[0];
+    // Map all available streams to languages list
+    const languages = streamUrls.map((_, idx) => {
+      let label = `Audio Track ${idx + 1}`;
+      if (idx === 0) label = 'Original / Default';
+      else if (idx === 1) label = 'Alternative Audio';
+      else if (idx === 2) label = 'Dub / Translation';
+      return {
+        id: String(idx),
+        name: label
+      };
+    });
+
+    // Parse variant index and resolve selected streamUrl
+    const variantIdx = variantId ? parseInt(variantId, 10) : 0;
+    const selectedIdx = (!isNaN(variantIdx) && variantIdx >= 0 && variantIdx < streamUrls.length) ? variantIdx : 0;
+    const streamUrl = streamUrls[selectedIdx];
+    const selectedLangName = languages[selectedIdx].name;
 
     // Parse direct qualities from master playlist
     let parsedQualities = await parseQualitiesFromMaster(streamUrl, DEFAULT_HEADERS);
@@ -49,7 +65,7 @@ module.exports = async function download(id, type, season = 1, episode = 1, vari
       quality: q.quality,
       size: estimateSize(q.quality),
       url: q.url,
-      language: 'English', // Default language for StreamIMDb
+      language: selectedLangName,
       headers: q.headers || DEFAULT_HEADERS
     }));
 
@@ -58,9 +74,7 @@ module.exports = async function download(id, type, season = 1, episode = 1, vari
       provider: 'streamimdb',
       downloadSupported: true,
       available: true,
-      languages: [
-        { id: 'en', name: 'English' }
-      ],
+      languages,
       qualities,
       headers: DEFAULT_HEADERS
     };

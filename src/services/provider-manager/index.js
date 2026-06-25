@@ -79,6 +79,9 @@ class ProviderManager {
     // Run health check immediately and start the scheduler
     this.runHealthChecks();
     this.healthInterval = setInterval(() => this.runHealthChecks(), 300000);
+    if (this.healthInterval && typeof this.healthInterval.unref === 'function') {
+      this.healthInterval.unref();
+    }
   }
 
   stopHealthMonitor() {

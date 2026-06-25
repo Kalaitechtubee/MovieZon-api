@@ -23,7 +23,10 @@ module.exports = async function stream(id, type = 'movie', season = 1, episode =
       throw new Error('API returned no playable stream URLs');
     }
 
-    const streamUrl = streamUrls[0];
+    // Parse variant index and resolve selected streamUrl
+    const variantIdx = variantId ? parseInt(variantId, 10) : 0;
+    const selectedIdx = (!isNaN(variantIdx) && variantIdx >= 0 && variantIdx < streamUrls.length) ? variantIdx : 0;
+    const streamUrl = streamUrls[selectedIdx];
     const imdbId = response.data.data.imdb_id;
 
     // Parse qualities from the master playlist if available
@@ -43,7 +46,22 @@ module.exports = async function stream(id, type = 'movie', season = 1, episode =
       });
     }
 
-    const embedUrl = `https://streamimdb.ru/embed/${isTv ? 'tv' : 'movie'}/${imdbId || id}`;
+    let embedUrl = `https://streamimdb.ru/embed/${isTv ? 'tv' : 'movie'}/${imdbId || id}`;
+    if (selectedIdx > 0) {
+      embedUrl += `?variant=${selectedIdx}`;
+    }
+
+    // Map all available streams to variants so the player switcher displays them
+    const variants = streamUrls.map((_, idx) => {
+      let label = `Audio Track ${idx + 1}`;
+      if (idx === 0) label = 'Original / Default';
+      else if (idx === 1) label = 'Alternative Audio';
+      else if (idx === 2) label = 'Dub / Translation';
+      return {
+        id: String(idx),
+        language: label
+      };
+    });
 
     return normalizeStream({
       provider: 'streamimdb',
@@ -55,7 +73,8 @@ module.exports = async function stream(id, type = 'movie', season = 1, episode =
       subtitles: [],
       headers: DEFAULT_HEADERS,
       qualities,
-      variants: [],
+      variants,
+      selectedVariantId: String(selectedIdx),
       expires: null
     }, 'streamimdb');
 

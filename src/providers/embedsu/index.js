@@ -50,9 +50,10 @@ class EmbedSuProvider extends BaseProvider {
       };
     } catch (err) {
       const duration = Date.now() - startTime;
+      // Always 'degraded' (not 'unhealthy') — embed URLs resolve client-side
       return { 
         status: 'degraded', 
-        message: `EmbedSU degraded: ${err.message}`, 
+        message: `EmbedSU unreachable from server (embed still works client-side): ${err.message}`, 
         responseTimeMs: duration 
       };
     }
