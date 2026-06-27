@@ -3,6 +3,7 @@ const StreamImdbProvider = require('../../providers/streamimdb');
 const AutoEmbedProvider = require('../../providers/autoembed');
 const EmbedSuProvider = require('../../providers/embedsu');
 const VidSrcProvider = require('../../providers/vidsrc');
+const VidSrcSbsProvider = require('../../providers/vidsrcsbs');
 const tmdbService = require('../tmdb');
 const cache = require('../../cache');
 const logger = require('../../logger');
@@ -61,6 +62,10 @@ class ProviderManager {
     // Register VidSrc
     const vidsrc = new VidSrcProvider();
     this.providers.set(vidsrc.name, vidsrc);
+
+    // Register VidSrc SBS
+    const vidsrcsbs = new VidSrcSbsProvider();
+    this.providers.set(vidsrcsbs.name, vidsrcsbs);
 
     // Initialize diagnostics
     this.providerDiagnostics = new Map();
@@ -136,7 +141,7 @@ class ProviderManager {
    * Get sorted providers by priority config
    */
   getSortedProviders() {
-    const priority = config.providerPriority || ['peachify', 'streamimdb', 'autoembed', 'embedsu', 'vidsrc'];
+    const priority = config.providerPriority || ['vidsrc-sbs', 'peachify', 'streamimdb', 'autoembed', 'embedsu', 'vidsrc'];
     return Array.from(this.providers.values()).sort((a, b) => {
       const idxA = priority.indexOf(a.name);
       const idxB = priority.indexOf(b.name);
