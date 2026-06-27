@@ -87,29 +87,45 @@ function buildEmbedUrls(id, type, season, episode) {
 
   if (isTv) {
     return [
-      // Primary — vidsrc.me (most reliable, rarely blocked)
-      `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Secondary — vidsrc.to (path format, high uptime)
-      `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
-      // Tertiary — vidsrc.xyz
-      `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Fallback — vsembed.su (sometimes slow)
-      `https://vsembed.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Last resort — vidsrc-embed.ru (often timing out)
+      // 1. Primary Clean Active Mirror
+      `https://vidsrc.sbs/embed/tv/${id}/${season}/${episode}`,
+
+      // 2. New Active Mirrors
+      `https://vidsrcme.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      `https://vidsrcme.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      `https://vidsro-me.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      `https://vidsrc-me.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
       `https://vidsrc-embed.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      `https://vidsrc-embed.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      `https://vsrc.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      
+      // 3. High Uptime Path-based Mirror
+      `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
+      
+      // 4. Cross-provider Failover (Last Resort)
+      `https://autoembed.co/tv/tmdb/${id}-${season}-${episode}`,
+      `https://embed.su/embed/tv/${id}/${season}/${episode}`,
     ];
   } else {
     return [
-      // Primary — vidsrc.me (most reliable, rarely blocked)
-      `https://vidsrc.me/embed/movie?tmdb=${id}`,
-      // Secondary — vidsrc.to (path format, high uptime)
-      `https://vidsrc.to/embed/movie/${id}`,
-      // Tertiary — vidsrc.xyz
-      `https://vidsrc.xyz/embed/movie?tmdb=${id}`,
-      // Fallback — vsembed.su (sometimes slow)
-      `https://vsembed.su/embed/movie?tmdb=${id}`,
-      // Last resort — vidsrc-embed.ru (often timing out)
+      // 1. Primary Clean Active Mirror
+      `https://vidsrc.sbs/embed/movie/${id}`,
+
+      // 2. New Active Mirrors
+      `https://vidsrcme.ru/embed/movie?tmdb=${id}`,
+      `https://vidsrcme.su/embed/movie?tmdb=${id}`,
+      `https://vidsro-me.ru/embed/movie?tmdb=${id}`,
+      `https://vidsrc-me.su/embed/movie?tmdb=${id}`,
       `https://vidsrc-embed.ru/embed/movie?tmdb=${id}`,
+      `https://vidsrc-embed.su/embed/movie?tmdb=${id}`,
+      `https://vsrc.su/embed/movie?tmdb=${id}`,
+      
+      // 3. High Uptime Path-based Mirror
+      `https://vidsrc.to/embed/movie/${id}`,
+      
+      // 4. Cross-provider Failover (Last Resort)
+      `https://autoembed.co/movie/tmdb/${id}`,
+      `https://embed.su/embed/movie/${id}`,
     ];
   }
 }
@@ -171,7 +187,7 @@ module.exports = async function stream(id, type = 'movie', season = 1, episode =
   logger.debug(`[VidSrc Stream] stream() called for ID: ${id}, Type: ${type}, S${season}E${episode}`);
 
   const embedFallbacks = buildEmbedUrls(id, type, season, episode);
-  const embedUrl = embedFallbacks[0]; // Primary is now vidsrc.me (most reliable)
+  const embedUrl = embedFallbacks[0]; // Primary is now vidsrc.sbs (cleanest)
 
   // Attempt to get a real HLS stream first (enables native player + download)
   try {
