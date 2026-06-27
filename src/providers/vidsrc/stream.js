@@ -87,32 +87,33 @@ function buildEmbedUrls(id, type, season, episode) {
 
   if (isTv) {
     return [
-      // Primary — vidsrc-embed.ru (documented API, query param format)
-      `https://vidsrc-embed.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Secondary — vsembed.su
-      `https://vsembed.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Tertiary — vidsrc.me
+      // Primary — vidsrc.me (most reliable, rarely blocked)
       `https://vidsrc.me/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
-      // Quaternary — vidsrc.to (path format)
+      // Secondary — vidsrc.to (path format, high uptime)
       `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
-      // Quinary — vidsrc.xyz
-      `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`
+      // Tertiary — vidsrc.xyz
+      `https://vidsrc.xyz/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      // Fallback — vsembed.su (sometimes slow)
+      `https://vsembed.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
+      // Last resort — vidsrc-embed.ru (often timing out)
+      `https://vidsrc-embed.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
     ];
   } else {
     return [
-      // Primary — vidsrc-embed.ru (documented API, query param format)
-      `https://vidsrc-embed.ru/embed/movie?tmdb=${id}`,
-      // Secondary — vsembed.su
-      `https://vsembed.su/embed/movie?tmdb=${id}`,
-      // Tertiary — vidsrc.me
+      // Primary — vidsrc.me (most reliable, rarely blocked)
       `https://vidsrc.me/embed/movie?tmdb=${id}`,
-      // Quaternary — vidsrc.to (path format)
+      // Secondary — vidsrc.to (path format, high uptime)
       `https://vidsrc.to/embed/movie/${id}`,
-      // Quinary — vidsrc.xyz
-      `https://vidsrc.xyz/embed/movie?tmdb=${id}`
+      // Tertiary — vidsrc.xyz
+      `https://vidsrc.xyz/embed/movie?tmdb=${id}`,
+      // Fallback — vsembed.su (sometimes slow)
+      `https://vsembed.su/embed/movie?tmdb=${id}`,
+      // Last resort — vidsrc-embed.ru (often timing out)
+      `https://vidsrc-embed.ru/embed/movie?tmdb=${id}`,
     ];
   }
 }
+
 
 /**
  * Try to resolve a direct HLS stream from the vidsrc-embed.ru JSON API.
@@ -170,7 +171,7 @@ module.exports = async function stream(id, type = 'movie', season = 1, episode =
   logger.debug(`[VidSrc Stream] stream() called for ID: ${id}, Type: ${type}, S${season}E${episode}`);
 
   const embedFallbacks = buildEmbedUrls(id, type, season, episode);
-  const embedUrl = embedFallbacks[0]; // Primary is vidsrc-embed.ru
+  const embedUrl = embedFallbacks[0]; // Primary is now vidsrc.me (most reliable)
 
   // Attempt to get a real HLS stream first (enables native player + download)
   try {
