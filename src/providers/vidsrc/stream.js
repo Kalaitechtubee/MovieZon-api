@@ -87,10 +87,7 @@ function buildEmbedUrls(id, type, season, episode) {
 
   if (isTv) {
     return [
-      // 1. Primary Clean Active Mirror
-      `https://vidsrc.sbs/embed/tv/${id}/${season}/${episode}/`,
-
-      // 2. New Active Mirrors
+      // 1. New Active Mirrors
       `https://vidsrcme.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
       `https://vidsrcme.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
       `https://vidsro-me.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
@@ -99,19 +96,16 @@ function buildEmbedUrls(id, type, season, episode) {
       `https://vidsrc-embed.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
       `https://vsrc.su/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
       
-      // 3. High Uptime Path-based Mirror
+      // 2. High Uptime Path-based Mirror
       `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`,
       
-      // 4. Cross-provider Failover (Last Resort)
+      // 3. Cross-provider Failover (Last Resort)
       `https://autoembed.co/tv/tmdb/${id}-${season}-${episode}`,
       `https://embed.su/embed/tv/${id}/${season}/${episode}`,
     ];
   } else {
     return [
-      // 1. Primary Clean Active Mirror
-      `https://vidsrc.sbs/embed/movie/${id}/`,
-
-      // 2. New Active Mirrors
+      // 1. New Active Mirrors
       `https://vidsrcme.ru/embed/movie?tmdb=${id}`,
       `https://vidsrcme.su/embed/movie?tmdb=${id}`,
       `https://vidsro-me.ru/embed/movie?tmdb=${id}`,
@@ -120,10 +114,10 @@ function buildEmbedUrls(id, type, season, episode) {
       `https://vidsrc-embed.su/embed/movie?tmdb=${id}`,
       `https://vsrc.su/embed/movie?tmdb=${id}`,
       
-      // 3. High Uptime Path-based Mirror
+      // 2. High Uptime Path-based Mirror
       `https://vidsrc.to/embed/movie/${id}`,
       
-      // 4. Cross-provider Failover (Last Resort)
+      // 3. Cross-provider Failover (Last Resort)
       `https://autoembed.co/movie/tmdb/${id}`,
       `https://embed.su/embed/movie/${id}`,
     ];
