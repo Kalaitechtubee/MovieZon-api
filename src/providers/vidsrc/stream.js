@@ -88,7 +88,7 @@ function buildEmbedUrls(id, type, season, episode) {
   if (isTv) {
     return [
       // 1. Primary Clean Active Mirror
-      `https://vidsrc.sbs/embed/tv/${id}/${season}/${episode}`,
+      `https://vidsrc.sbs/embed/tv/${id}/${season}/${episode}/`,
 
       // 2. New Active Mirrors
       `https://vidsrcme.ru/embed/tv?tmdb=${id}&season=${season}&episode=${episode}`,
@@ -109,7 +109,7 @@ function buildEmbedUrls(id, type, season, episode) {
   } else {
     return [
       // 1. Primary Clean Active Mirror
-      `https://vidsrc.sbs/embed/movie/${id}`,
+      `https://vidsrc.sbs/embed/movie/${id}/`,
 
       // 2. New Active Mirrors
       `https://vidsrcme.ru/embed/movie?tmdb=${id}`,
