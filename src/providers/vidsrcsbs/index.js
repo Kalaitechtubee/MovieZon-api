@@ -4,10 +4,7 @@ const { normalizeStream } = require('../../utils/normalizer');
 class VidSrcSbsProvider extends BaseProvider {
   constructor() {
     super('vidsrc-sbs');
-  }
-
-  get displayName() {
-    return 'VidSrc SBS';
+    this.displayName = 'VidSrc SBS';
   }
 
   get downloadSupported() {
