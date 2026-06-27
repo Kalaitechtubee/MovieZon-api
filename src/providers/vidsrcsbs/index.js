@@ -37,7 +37,7 @@ class VidSrcSbsProvider extends BaseProvider {
       streamType: 'embed',
       embedUrl: embedUrl,
       embedFallbacks: [embedUrl]
-    });
+    }, 'vidsrc-sbs');
   }
 
   async health() {
