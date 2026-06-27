@@ -1,7 +1,5 @@
 const PeachifyProvider = require('../../providers/peachify');
 const StreamImdbProvider = require('../../providers/streamimdb');
-const AutoEmbedProvider = require('../../providers/autoembed');
-const EmbedSuProvider = require('../../providers/embedsu');
 const VidSrcProvider = require('../../providers/vidsrc');
 const VidSrcSbsProvider = require('../../providers/vidsrcsbs');
 const tmdbService = require('../tmdb');
@@ -51,13 +49,7 @@ class ProviderManager {
     const streamimdb = new StreamImdbProvider();
     this.providers.set(streamimdb.name, streamimdb);
 
-    // Register AutoEmbed
-    const autoembed = new AutoEmbedProvider();
-    this.providers.set(autoembed.name, autoembed);
 
-    // Register EmbedSU
-    const embedsu = new EmbedSuProvider();
-    this.providers.set(embedsu.name, embedsu);
 
     // Register VidSrc
     const vidsrc = new VidSrcProvider();
@@ -141,7 +133,7 @@ class ProviderManager {
    * Get sorted providers by priority config
    */
   getSortedProviders() {
-    const priority = config.providerPriority || ['vidsrc-sbs', 'peachify', 'streamimdb', 'autoembed', 'embedsu', 'vidsrc'];
+    const priority = config.providerPriority || ['vidsrc-sbs', 'peachify', 'streamimdb', 'vidsrc'];
     return Array.from(this.providers.values()).sort((a, b) => {
       const idxA = priority.indexOf(a.name);
       const idxB = priority.indexOf(b.name);
@@ -408,116 +400,7 @@ class ProviderManager {
     };
   }
 
-  /**
-   * Download stream pipeline.
-   */
-  async resolveDownload(tmdbId, type, season = 1, episode = 1, variantId = null) {
-    const pipelineCacheKey = `pipeline:download:${type}:${tmdbId}:${season}:${episode}:${variantId || 'default'}`;
-    const cachedResult = cache.get(pipelineCacheKey);
-    if (cachedResult) {
-      logger.info(`[DownloadP] Cache HIT for TMDB ${tmdbId}`);
-      return cachedResult;
-    }
 
-    logger.info(`[DownloadP] Sequential download resolution for TMDB ${tmdbId}`);
-    
-    const sortedProviders = this.getSortedProviders();
-    const lastSuccessProviderCacheKey = `last_success_download_provider:${tmdbId}`;
-    const lastSuccessfulProvider = cache.get(lastSuccessProviderCacheKey);
-
-    let providersToTry = [...sortedProviders];
-    if (lastSuccessfulProvider) {
-      const idx = providersToTry.findIndex(p => p.name === lastSuccessfulProvider);
-      if (idx !== -1) {
-        const [p] = providersToTry.splice(idx, 1);
-        providersToTry.unshift(p);
-      }
-    }
-
-    const startMs = Date.now();
-    let selectedProvider = null;
-    let fallbackCount = 0;
-
-    for (const provider of providersToTry) {
-      // Check health status to skip if offline
-      const diag = this.providerDiagnostics.get(provider.name);
-      if (diag && !diag.online) {
-        logger.info(`[DownloadP] Skipping offline provider: ${provider.displayName}`);
-        continue;
-      }
-
-      let attempts = 0;
-      let success = false;
-      let downloadData = null;
-      const providerStart = Date.now();
-
-      while (attempts < 2 && !success) {
-        attempts++;
-        try {
-          downloadData = await provider.download(tmdbId, type, season, episode, variantId);
-          if (downloadData && downloadData.success && downloadData.available && downloadData.qualities && downloadData.qualities.length > 0) {
-            success = true;
-          } else {
-            const latency = Date.now() - providerStart;
-            logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Failure | Reason: Unsupported or no streams | Latency: ${latency}ms`);
-            break;
-          }
-        } catch (err) {
-          logger.warn(`[DownloadP] Provider ${provider.displayName} attempt ${attempts} failed: ${err.message}`);
-          if (attempts >= 2) {
-            const latency = Date.now() - providerStart;
-            logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Failure | Reason: ${err.message} | Latency: ${latency}ms`);
-            
-            const diagState = this.providerDiagnostics.get(provider.name) || {};
-            this.providerDiagnostics.set(provider.name, {
-              ...diagState,
-              latency,
-              error: err.message
-            });
-          } else {
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-        }
-      }
-
-      if (success && downloadData) {
-        const latency = Date.now() - providerStart;
-        logger.info(`[Provider Log] Provider: ${provider.displayName} | Type: Download | Status: Success | Latency: ${latency}ms`);
-        
-        const diagState = this.providerDiagnostics.get(provider.name) || {};
-        this.providerDiagnostics.set(provider.name, {
-          ...diagState,
-          movieAvailable: true,
-          latency,
-          lastSuccess: new Date(),
-          error: null
-        });
-
-        selectedProvider = provider.name;
-        const resolvedResult = {
-          ...downloadData,
-          selectedProvider: provider.name,
-          available: true,
-          fallbackTriggered: fallbackCount > 0
-        };
-
-        cache.set(pipelineCacheKey, resolvedResult, 900);
-        cache.set(lastSuccessProviderCacheKey, provider.name, 900);
-
-        const totalMs = Date.now() - startMs;
-        logger.info(`[Pipeline Log] Selected Download Provider: ${provider.displayName} | Fallback Count: ${fallbackCount} | Total Latency: ${totalMs}ms`);
-        return resolvedResult;
-      } else {
-        fallbackCount++;
-      }
-    }
-
-    return {
-      success: false,
-      available: false,
-      reason: 'No provider supports direct download for this title.'
-    };
-  }
 }
 
 module.exports = new ProviderManager();
