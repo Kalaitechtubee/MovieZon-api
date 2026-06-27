@@ -51,10 +51,28 @@ async function parseQualitiesFromMaster(masterUrl, requestHeaders = {}) {
 
   try {
     logger.info(`[StreamIMDb Parser] Parsing master playlist: ${masterUrl}`);
-    const response = await axios.get(masterUrl, {
+    let response = await axios.get(masterUrl, {
       headers,
-      timeout: 5000
+      timeout: 5000,
+      validateStatus: false
     });
+
+    // Retry via Cloudflare Worker if source IP-blocks Render.com
+    if (response.status < 200 || response.status >= 300) {
+      logger.warn(`[StreamIMDb Parser] Source returned ${response.status}. Retrying via Worker proxy...`);
+      try {
+        const proxyUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(masterUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+        const workerRes = await axios.get(proxyUrl, { timeout: 10000, validateStatus: false });
+        if (workerRes.status >= 200 && workerRes.status < 300) {
+          logger.info(`[StreamIMDb Parser] Worker proxy succeeded for master playlist`);
+          response = workerRes;
+        } else {
+          throw new Error(`Request failed with status code ${response.status}`);
+        }
+      } catch (proxyErr) {
+        throw new Error(`Request failed with status code ${response.status}`);
+      }
+    }
 
     const playlistText = response.data;
     if (typeof playlistText !== 'string') return [];

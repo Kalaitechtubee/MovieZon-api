@@ -317,13 +317,43 @@ async function streamVideoProxy(req, res, next) {
     if (isM3u8Url) {
       logger.info(`[ProxyStream] Detected HLS playlist. Fetching and rewriting URLs for: ${targetUrl}`);
       try {
-        const response = await axios({
+        let response = await axios({
           method: 'get',
           url: targetUrl,
           headers,
           responseType: 'text',
           validateStatus: false
         });
+
+        // ── Cloudflare Worker fallback for blocked source CDNs ──────────────────
+        // If source returns 403/429 or any non-2xx, retry through the Worker
+        // proxy. This handles Render.com's IP being blocked by nextgenmarketinghub.site
+        // and other CDNs that geo/IP-block cloud provider ranges.
+        if (response.status < 200 || response.status >= 300) {
+          const isAlreadyWorker = targetUrl.includes('workers.dev') || targetUrl.includes('streamhub-proxy');
+          if (!isAlreadyWorker) {
+            logger.warn(`[ProxyStream] Source returned ${response.status} for HLS playlist. Retrying via Cloudflare Worker proxy...`);
+            const workerUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(targetUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+            try {
+              const workerResponse = await axios({
+                method: 'get',
+                url: workerUrl,
+                responseType: 'text',
+                timeout: 12000,
+                validateStatus: false
+              });
+              if (workerResponse.status >= 200 && workerResponse.status < 300) {
+                logger.info(`[ProxyStream] Worker proxy succeeded for: ${targetUrl}`);
+                response = workerResponse;
+              } else {
+                logger.warn(`[ProxyStream] Worker proxy also returned ${workerResponse.status}. Forwarding original error.`);
+              }
+            } catch (workerErr) {
+              logger.error(`[ProxyStream] Worker proxy fetch failed: ${workerErr.message}`);
+            }
+          }
+        }
+        // ───────────────────────────────────────────────────────────────────────
 
         res.status(response.status);
         res.setHeader('Content-Type', response.headers['content-type'] || 'application/vnd.apple.mpegurl');

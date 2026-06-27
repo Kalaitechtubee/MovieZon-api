@@ -200,6 +200,15 @@ sequenceDiagram
     Server-->>Client: 200 OK (JSON with tokenized download URLs)
 ```
 
+> [!NOTE]
+> **VidSrc Provider Internal Fallback Chain:**
+> If the `VidSrc` provider is invoked for download resolution (either via sequential failover or explicitly at `/api/v2/download/vidsrc/:id`), it executes an internal multi-tiered fallback pipeline if direct resolution fails:
+> 1. **Primary API Check:** Attempts stream extraction via `vidsrc-embed.ru` direct stream API.
+> 2. **Alternative API Check:** Attempts stream extraction via `vidsrc-embed.su` direct stream API.
+> 3. **Internal Peachify Fallback:** If direct APIs fail (due to resource 404 or Cloudflare/IP proxy blocks), it internally invokes `Peachify`'s download resolver to extract direct streams.
+> 4. **Internal StreamIMDb Fallback:** If Peachify resolution fails (e.g. proxy allowlist timeout), it invokes `StreamIMDb`'s download resolver as the final fallback layer.
+> 5. **Result Override:** If any fallback succeeds, the provider metadata name is overridden back to `vidsrc` to maintain API routing consistency for the client.
+
 ---
 
 ## 💾 Resilient Proxy & Health Monitor
@@ -225,7 +234,7 @@ To protect the server, enforce CORS, bypass IP blocks, and parse chunked content
 ### 1. Download Token Encryption (`playerService.encryptToken`)
 Download URLs are protected from tampering and IP leakages by wrapping them in secure, temporary state tokens:
 * **Algorithm:** `AES-256-CBC`
-* **Encryption Key:** Automatically generated at server startup (`PROXY_TOKEN_SECRET`).
+* **Encryption Key:** Stable encryption key derived from `process.env.PROXY_TOKEN_SECRET`. If not defined, it falls back to a hardcoded string hashed using SHA-256 (`crypto.createHash('sha256')`) to ensure key stability across server container restarts (such as Render container restarts/spin-downs).
 * **Payload:** Contains target CDN URL, custom download request headers, and custom formatted target filename (e.g. `Swapped_S1E1_1080p.mp4`).
 * **Route:** `/api/v2/download/proxy?token={iv:encryptedData}`
 

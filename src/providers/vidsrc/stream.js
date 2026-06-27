@@ -9,9 +9,53 @@ const DEFAULT_HEADERS = {
   'Origin': 'https://vidsrc-embed.ru'
 };
 
+// ── Circuit Breaker ────────────────────────────────────────────────────────────
+// After CIRCUIT_FAIL_THRESHOLD consecutive failures the circuit OPENS and all
+// API calls are short-circuited for CIRCUIT_RESET_MS (3 minutes). This prevents
+// ~15 seconds of wasted timeout time per request when both vidsrc-embed APIs are
+// down (7s direct + 8s Worker proxy = 15s × 2 endpoints = 30s burned per call).
+const CIRCUIT_FAIL_THRESHOLD = 2;   // open after N consecutive full failures
+const CIRCUIT_RESET_MS = 3 * 60 * 1000; // stay open for 3 minutes
+
+const _circuit = {
+  failures: 0,
+  openedAt: null,
+  get isOpen() {
+    if (this.openedAt === null) return false;
+    if (Date.now() - this.openedAt >= CIRCUIT_RESET_MS) {
+      // Auto-reset: give VidSrc another chance
+      logger.info('[VidSrc] Circuit breaker reset — retrying VidSrc APIs');
+      this.failures = 0;
+      this.openedAt = null;
+      return false;
+    }
+    return true;
+  },
+  recordFailure() {
+    this.failures++;
+    if (this.failures >= CIRCUIT_FAIL_THRESHOLD && this.openedAt === null) {
+      this.openedAt = Date.now();
+      const cooldownMins = Math.round(CIRCUIT_RESET_MS / 60000);
+      logger.warn(`[VidSrc] Circuit breaker OPENED after ${this.failures} consecutive failures. Skipping VidSrc API for ${cooldownMins} minutes.`);
+    }
+  },
+  recordSuccess() {
+    this.failures = 0;
+    this.openedAt = null;
+  }
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function vidsrcGet(url, options = {}) {
+  // Short-circuit immediately if circuit is open
+  if (_circuit.isOpen) {
+    throw new Error('VidSrc circuit breaker is open — skipping API call');
+  }
+
   try {
-    return await axios.get(url, { ...options, timeout: options.timeout || 7000 });
+    const res = await axios.get(url, { ...options, timeout: options.timeout || 4000 });
+    _circuit.recordSuccess();
+    return res;
   } catch (err) {
     logger.warn(`[VidSrc] Direct request failed for ${url}: ${err.message}. Retrying via Cloudflare Worker proxy...`);
     const headersToForward = options.headers
@@ -19,11 +63,13 @@ async function vidsrcGet(url, options = {}) {
       : JSON.stringify(DEFAULT_HEADERS);
     const proxyUrl = `${config.workerProxyUrl}/?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(headersToForward)}`;
     try {
-      const res = await axios.get(proxyUrl, { timeout: options.timeout || 8000 });
+      const res = await axios.get(proxyUrl, { timeout: (options.timeout || 4000) + 2000 });
       logger.info(`[VidSrc Proxy] Successfully fetched via Cloudflare Worker proxy: ${url}`);
+      _circuit.recordSuccess();
       return res;
     } catch (proxyErr) {
       logger.error(`[VidSrc Proxy] Cloudflare Worker proxy request also failed: ${proxyErr.message}`);
+      _circuit.recordFailure();
       throw err; // throw original error
     }
   }
@@ -93,7 +139,7 @@ async function resolveDirectStream(id, type, season, episode) {
   for (const api of apisToTry) {
     try {
       logger.info(`[VidSrc Stream] Trying direct API: ${api.url}`);
-      const res = await vidsrcGet(api.url, { headers: api.headers, timeout: 7000 });
+      const res = await vidsrcGet(api.url, { headers: api.headers, timeout: 3500 });
       const data = res.data;
 
       if (data && (data.url || data.stream_url || data.hls)) {
