@@ -2,16 +2,13 @@ const BaseProvider = require('../BaseProvider');
 const { normalizeCatalogItem } = require('../../utils/normalizer');
 const { streamimdbGet } = require('./utils');
 const stream = require('./stream');
-const download = require('./download');
 
 class StreamImdbProvider extends BaseProvider {
   constructor() {
     super('streamimdb');
   }
 
-  get downloadSupported() {
-    return true;
-  }
+
 
   async search(query) {
     return [];
@@ -34,9 +31,7 @@ class StreamImdbProvider extends BaseProvider {
     return await stream(id, type, season, episode, variantId, clientIp);
   }
 
-  async download(id, type, season = 1, episode = 1, variantId = null) {
-    return await download(id, type, season, episode, variantId);
-  }
+
 
   async health() {
     const startTime = Date.now();

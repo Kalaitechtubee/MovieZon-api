@@ -66,7 +66,6 @@ class ProviderManager {
         online: true,
         movieAvailable: false,
         streamSupported: true,
-        downloadSupported: provider.downloadSupported,
         latency: 0,
         lastSuccess: null,
         error: null
@@ -185,7 +184,6 @@ class ProviderManager {
     // 2. Fetch stream details for all sorted providers to confirm availability
     const sortedProviders = this.getSortedProviders();
     const sources = [];
-    let downloadAvailable = false;
     let firstPlayableProvider = null;
     let primaryEmbedUrl = null;
     let primaryEmbedFallbacks = [];
@@ -229,17 +227,12 @@ class ProviderManager {
         serverIndex: idx + 1,
         available: providerPlayable,
         status: status,
-        downloadSupported: provider.downloadSupported,
         languages: audioLangs,
         streamType: provider.name === 'peachify' ? 'embed' : 'hls',
         embedUrl: providerEmbedUrl,
         embedFallbacks: providerEmbedFallbacks,
         variants: []
       });
-
-      if (providerPlayable && provider.downloadSupported) {
-        downloadAvailable = true;
-      }
     }
 
     // Determine the watch provider from TMDB metadata if valid, otherwise default to the first playable provider
@@ -258,7 +251,7 @@ class ProviderManager {
       supportedAudio: audioLangs,
       supportedSubtitles: [],
       supportedQualities: [],
-      downloadAvailable: downloadAvailable,
+      downloadAvailable: false,
 
       // Structured API contract fields
       player: {
@@ -269,7 +262,7 @@ class ProviderManager {
         embedFallbacks: primaryEmbedFallbacks
       },
       download: {
-        available: downloadAvailable,
+        available: false,
         qualities: []
       }
     };

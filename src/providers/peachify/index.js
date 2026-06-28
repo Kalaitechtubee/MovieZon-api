@@ -3,16 +3,13 @@ const logger = require('../../logger');
 const { normalizeCatalogItem } = require('../../utils/normalizer');
 const { peachifyGet } = require('./utils');
 const stream = require('./stream');
-const download = require('./download');
 
 class PeachifyProvider extends BaseProvider {
   constructor() {
     super('peachify');
   }
 
-  get downloadSupported() {
-    return true;
-  }
+
 
   async search(query) {
     return [];
@@ -39,9 +36,7 @@ class PeachifyProvider extends BaseProvider {
     return await stream(id, type, season, episode, variantId, clientIp);
   }
 
-  async download(id, type, season = 1, episode = 1, variantId = null) {
-    return await download(id, type, season, episode, variantId);
-  }
+
 
   async health() {
     const startTime = Date.now();

@@ -7,9 +7,7 @@ class VidSrcSbsProvider extends BaseProvider {
     this.displayName = 'VidSrc SBS';
   }
 
-  get downloadSupported() {
-    return false;
-  }
+
 
   async search(query) {
     return [];

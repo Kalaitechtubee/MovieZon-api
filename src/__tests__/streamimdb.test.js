@@ -22,7 +22,6 @@ describe('StreamIMDb Provider Unit Tests', () => {
   test('Should instantiate StreamImdbProvider correctly', () => {
     assert.equal(provider.name, 'streamimdb');
     assert.equal(provider.displayName, 'Streamimdb');
-    assert.equal(provider.downloadSupported, true);
   });
 
   test('exists() should return true', async () => {
@@ -96,35 +95,7 @@ describe('StreamIMDb Provider Unit Tests', () => {
     assert.equal(streamData.qualities[0].url, 'https://example.com/movie/1080p.m3u8');
   });
 
-  test('download() should return download stream payload with qualities', async () => {
-    const mockApiResponse = {
-      status_code: '200',
-      data: {
-        title: 'Test Movie',
-        imdb_id: 'tt9999999',
-        stream_urls: [
-          'https://example.com/movie/master.m3u8'
-        ]
-      }
-    };
 
-    const mockM3u8Content = `#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080
-1080p.m3u8`;
-
-    mock.method(axios, 'get', async (url) => {
-      if (url.includes('api.php')) {
-        return { status: 200, data: mockApiResponse };
-      }
-      return { status: 200, data: mockM3u8Content };
-    });
-
-    const downloadData = await provider.download('12345', 'movie');
-    assert.equal(downloadData.provider, 'streamimdb');
-    assert.equal(downloadData.available, true);
-    assert.equal(downloadData.qualities.length, 1);
-    assert.equal(downloadData.qualities[0].quality, '1080p');
-  });
 
   test('health() should return healthy status if API is reachable', async () => {
     mock.method(axios, 'get', async () => {

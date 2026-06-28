@@ -58,28 +58,7 @@ class BaseProvider {
     throw new Error(`Method 'stream()' must be implemented by provider ${this.displayName}`);
   }
 
-  /**
-   * Getter indicating if this provider supports direct downloads
-   * @returns {boolean}
-   */
-  get downloadSupported() {
-    return false;
-  }
 
-  /**
-   * Get download stream details for a movie or TV show episode.
-   * Embed-only providers (e.g. Peachify) should not override this — the default
-   * throws NotSupported so the pipeline skips them for download requests.
-   * @param {string|number} id - TMDB ID
-   * @param {'movie'|'tv'} type - Media type
-   * @param {number} [season]
-   * @param {number} [episode]
-   * @param {string} [variantId]
-   * @returns {Promise<Object>} Normalized stream object with direct CDN URLs
-   */
-  async download(id, type, season = 1, episode = 1, variantId = null) {
-    throw new Error(`Provider ${this.displayName} does not support direct downloads.`);
-  }
 
   /**
    * Run health check

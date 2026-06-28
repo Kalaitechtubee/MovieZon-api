@@ -5,8 +5,7 @@
  *  1. Details endpoint never resolves streams (no HLS/MP4 CDN URLs in sources)
  *  2. defaultProvider is always the highest-priority working provider
  *  3. resolveStream always tries NetMirror before Peachify
- *  4. resolveDownload always tries NetMirror before Peachify
- *  5. All pipelines are sequential (never parallel)
+ *  4. All pipelines are sequential (never parallel)
  *
  * Run with: node --test src/__tests__/pipeline.test.js
  * (Node.js v18+ built-in test runner)
@@ -34,7 +33,6 @@ function makeProvider(name, opts = {}) {
     displayName: name,
     stream: opts.stream ?? (async () => { throw new Error(`${name} stream unavailable`); }),
     details: opts.details ?? (async () => ({ tmdbId: '999', title: 'Test Movie', mediaType: 'movie' })),
-    download: opts.download ?? (async () => { throw new Error(`${name} does not support downloads`); }),
   };
 }
 
@@ -113,28 +111,7 @@ async function runResolveStream(providers, tmdbId, type) {
   return { available: false, callOrder };
 }
 
-/**
- * Stripped-down resolveDownload() for test verification.
- */
-async function runResolveDownload(providers, tmdbId, type) {
-  const callOrder = [];
-  for (const provider of providers) {
-    callOrder.push(provider.name);
-    try {
-      const downloadData = await provider.download(tmdbId, type, 1, 1, null);
-      const hasDirectStreams = downloadData && (
-        downloadData.streamUrl ||
-        (downloadData.qualities && downloadData.qualities.length > 0)
-      );
-      if (hasDirectStreams) {
-        return { selectedProvider: provider.name, available: true, callOrder };
-      }
-    } catch (err) {
-      // Provider doesn't support download — continue
-    }
-  }
-  return { available: false, callOrder };
-}
+
 
 // ─── Provider priority order (mirrors config.providerPriority) ─────────────────
 const PRIORITY_ORDER = ['netmirror', 'peachify'];
@@ -400,91 +377,7 @@ describe('Stream Pipeline — resolveStream Sequential Resolution', () => {
 });
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// DOWNLOAD PIPELINE TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Download Pipeline — resolveDownload Sequential Resolution', () => {
-
-  test('TC-DL01: NetMirror success → selectedProvider must be netmirror', async () => {
-    const providers = getSortedProviders([
-      makeProvider('netmirror', {
-        download: async () => ({
-          streamUrl: 'https://cdn.example.com/movie.mp4',
-          qualities: [{ quality: '1080p', url: 'https://cdn.example.com/1080p.mp4' }]
-        })
-      }),
-      makeProvider('peachify', {
-        download: async () => { throw new Error('Peachify does not support direct downloads'); }
-      }),
-    ]);
-
-    const result = await runResolveDownload(providers, '999', 'movie');
-
-    assert.equal(result.available, true);
-    assert.equal(result.selectedProvider, 'netmirror', 'Download must be served by netmirror');
-    assert.equal(result.callOrder[0], 'netmirror', 'NetMirror must be tried first');
-  });
-
-  test('TC-DL02: Peachify must NEVER be called before NetMirror for downloads', async () => {
-    const callOrder = [];
-    const providers = getSortedProviders([
-      makeProvider('netmirror', {
-        download: async () => {
-          callOrder.push('netmirror');
-          return { qualities: [{ quality: '1080p', url: 'https://cdn.example.com/1080p.mp4' }] };
-        }
-      }),
-      makeProvider('peachify', {
-        download: async () => {
-          callOrder.push('peachify');
-          throw new Error('Embed-only');
-        }
-      }),
-    ]);
-
-    await runResolveDownload(providers, '999', 'movie');
-
-    assert.equal(callOrder[0], 'netmirror', 'NetMirror must be called first for downloads — ALWAYS');
-    assert.equal(callOrder.includes('peachify'), false, 'Peachify must NOT be called when NetMirror succeeds');
-  });
-
-  test('TC-DL03: Peachify embed-only error is caught and skipped (not a pipeline failure)', async () => {
-    const providers = getSortedProviders([
-      makeProvider('netmirror', {
-        download: async () => { throw new Error('No download for this title'); }
-      }),
-      makeProvider('peachify', {
-        download: async () => { throw new Error('Peachify does not support direct downloads'); }
-      }),
-    ]);
-
-    const result = await runResolveDownload(providers, '999', 'movie');
-
-    assert.equal(result.available, false, 'Must return unavailable, not throw');
-    assert.equal(result.callOrder.length, 2, 'Both providers must be tried before giving up');
-  });
-
-  test('TC-DL04: NetMirror failure → Peachify is tried as fallback', async () => {
-    // Hypothetical: Peachify gains download support in future
-    const providers = getSortedProviders([
-      makeProvider('netmirror', {
-        download: async () => { throw new Error('No download available'); }
-      }),
-      makeProvider('peachify', {
-        download: async () => ({
-          qualities: [{ quality: '720p', url: 'https://example.com/720p.mp4' }]
-        })
-      }),
-    ]);
-
-    const result = await runResolveDownload(providers, '999', 'movie');
-
-    assert.equal(result.callOrder[0], 'netmirror', 'NetMirror must always be tried first');
-    assert.equal(result.callOrder[1], 'peachify', 'Peachify must be tried as fallback');
-    assert.equal(result.selectedProvider, 'peachify', 'Peachify resolves the download as fallback');
-  });
-});
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -907,29 +800,6 @@ describe('HLS Playlist Rewriting and Multi-language Proxy Support', () => {
   });
 });
 
-describe('Secure Download Pipeline & Token Proxying', () => {
-  const playerService = require('../services/player');
 
-  test('TC-TD01: Should correctly encrypt and decrypt proxy tokens', () => {
-    const payload = {
-      url: 'https://bcdnxw.hakunaymatata.com/resource/video.mp4',
-      headers: { 'referer': 'https://netfilm.world/' },
-      filename: 'Swapped_1080p.mp4'
-    };
-
-    const token = playerService.encryptToken(payload);
-    assert.ok(token);
-    assert.ok(token.includes(':'));
-
-    const decrypted = playerService.decryptToken(token);
-    assert.deepEqual(decrypted, payload);
-  });
-
-  test('TC-TD02: Should fail to decrypt modified or invalid tokens', () => {
-    const invalidToken = 'abcde:12345';
-    const decrypted = playerService.decryptToken(invalidToken);
-    assert.equal(decrypted, null);
-  });
-});
 
 console.log('\n✅ All MovieZon provider pipeline tests defined. Run with: node --test src/__tests__/pipeline.test.js\n');

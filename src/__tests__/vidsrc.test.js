@@ -33,10 +33,7 @@ describe('VidSrc Provider Unit Tests', () => {
 
   /* ─── Basic Provider Properties ─────────────────────────────────────────── */
 
-  test('Should instantiate VidSrcProvider correctly', () => {
-    assert.equal(provider.name, 'vidsrc');
-    assert.equal(provider.downloadSupported, true);
-  });
+
 
   test('exists() should always return true (embed providers are always attempted)', async () => {
     const res = await provider.exists('1007757', 'movie');

@@ -1,18 +1,13 @@
 const BaseProvider = require('../BaseProvider');
 const axios = require('axios');
 const stream = require('./stream');
-const download = require('./download');
 
 class VidSrcProvider extends BaseProvider {
   constructor() {
     super('vidsrc');
   }
 
-  // VidSrc attempts direct stream extraction — if it gets an HLS URL, download is supported.
-  // We mark this true so the download pipeline tries; download.js returns false internally if unavailable.
-  get downloadSupported() {
-    return true;
-  }
+
 
   async search(query) {
     return [];
@@ -30,9 +25,7 @@ class VidSrcProvider extends BaseProvider {
     return await stream(id, type, season, episode, variantId, clientIp);
   }
 
-  async download(id, type, season = 1, episode = 1, variantId = null) {
-    return await download(id, type, season, episode, variantId);
-  }
+
 
   async health() {
     const startTime = Date.now();
