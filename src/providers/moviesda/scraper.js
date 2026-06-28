@@ -1,12 +1,18 @@
 /**
- * Moviesda Scraper
+ * Moviesda Scraper — REVISED v2
  *
- * Resolves direct MP4 download links from moviesda33.com via a multi-hop chain:
- *   1. Search for movie slug by title
- *   2. Load movie page → get quality options (360p, 720p, 1080p)
- *   3. Load quality page → get file variants (size, href)
- *   4. Load moviesda download page → get intermediate CDN relay URL
- *   5. Load CDN relay page → extract final direct MP4 + watch-online URLs
+ * Actual site structure (confirmed from screenshots):
+ *
+ * Pattern A — Movie index page → quality sub-pages:
+ *   /blast-2026-movie/               → lists qualities as div.f > a links
+ *   /download/blast-2026-original-1080p-hd/  → "Download Information" page with file details
+ *
+ * Pattern B — Direct download info page (most common):
+ *   /download/{slug}/                → "Download Information" layout with:
+ *     - File Name, File Size, Duration, Video Resolution, Format, Added On
+ *     - "Download Server 1" / "Download Server 2" links → relay → CDN MP4
+ *
+ * Note: moviesda uses /download/ in its OWN page URLs — do NOT filter these!
  */
 
 const axios = require('axios');
@@ -31,10 +37,10 @@ const SCRAPE_HEADERS = {
 };
 
 /**
- * Fetch HTML from a URL with a configurable timeout.
+ * Fetch HTML from a URL.
  * @param {string} url
  * @param {object} [opts]
- * @returns {Promise<string>} raw HTML
+ * @returns {Promise<string>}
  */
 async function fetchHtml(url, opts = {}) {
   const response = await axios.get(url, {
@@ -47,12 +53,10 @@ async function fetchHtml(url, opts = {}) {
 
 /**
  * Slugify a movie title for URL construction.
- * e.g. "Blast 2026" → "blast-2026"
- * @param {string} title
- * @returns {string}
+ * e.g. "Karuppu" → "karuppu",  "Blast 2026" → "blast-2026"
  */
-function slugify(title) {
-  return title
+function slugify(str) {
+  return str
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
     .trim()
@@ -76,35 +80,41 @@ async function getWorkingDomain() {
   throw new Error('All Moviesda domains are unreachable.');
 }
 
+// ─── URL Classification ───────────────────────────────────────────────────────
+
 /**
- * Patterns that identify category/listing pages, not individual movie pages.
- * These should be excluded from search results.
+ * Patterns that identify category/listing pages — NOT individual movie pages.
+ * IMPORTANT: /download/ is NOT in this list because moviesda uses it in movie page URLs!
  */
 const CATEGORY_URL_PATTERNS = [
-  /-movies\//,          // /tamil-2026-movies/
-  /\/tamil-movies\//,   // /tamil-movies/a/
+  /-movies\//,           // /tamil-2026-movies/
+  /\/tamil-movies\//,    // /tamil-movies/a/
   /\/hindi-movies\//,
   /\/dubbed-movies\//,
   /\/category\//,
   /\/tag\//,
   /\/page\//,
-  /\/\d{4}\//,          // /2026/
-  /\/[a-z]\//,          // /a/ /b/ etc (alphabetical listing)
+  /\/\d{4}\//,           // /2026/ (year archive)
+  /\/[a-z]\//,           // /a/ /b/ alphabetical listing
 ];
 
-/**
- * Returns true if the URL looks like an individual movie detail page.
- */
 function isMoviePage(href) {
   return !CATEGORY_URL_PATTERNS.some((re) => re.test(href));
 }
 
 /**
- * Search for a movie title on the Moviesda search form.
- * Returns an array of { title, href } results — only individual movie pages.
- * @param {string} title
- * @param {string} baseUrl
- * @returns {Promise<Array<{title: string, href: string}>>}
+ * Returns true if the URL looks like a moviesda "Download Information" page.
+ * e.g. /download/karuppu-2026-original-720p-hd/
+ */
+function isDownloadInfoPage(href) {
+  return /\/download\/[a-z0-9-]+\/$/.test(href) || href.includes('/download/');
+}
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+/**
+ * Search the Moviesda search form.
+ * Returns movie-page and download-info-page results only — no category pages.
  */
 async function searchTitle(title, baseUrl) {
   try {
@@ -113,22 +123,30 @@ async function searchTitle(title, baseUrl) {
     const $ = cheerio.load(html);
 
     const results = [];
-    // Movie listing items appear as div.f > a
-    $('main .f a, main .folder a, main a[href*="-movie"]').each((_, el) => {
+    // Both movie index pages and download info pages can appear in search
+    $('main .f a, main .folder a, main a').each((_, el) => {
       const href = $(el).attr('href');
       const text = $(el).text().trim();
-      if (!href || !text) return;
-      if (href.includes('/download/')) return;
+      if (!href || !text || text.length < 3) return;
+
       const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
 
-      // Only include individual movie pages, not category/year listing pages
+      // Skip pure category listing pages
       if (!isMoviePage(fullHref)) return;
 
       results.push({ title: text, href: fullHref });
     });
 
-    logger.debug(`[Moviesda] Search for "${title}" → ${results.length} movie-page results`);
-    return results;
+    // Deduplicate by href
+    const seen = new Set();
+    const unique = results.filter((r) => {
+      if (seen.has(r.href)) return false;
+      seen.add(r.href);
+      return true;
+    });
+
+    logger.debug(`[Moviesda] Search for "${title}" → ${unique.length} results`);
+    return unique;
   } catch (err) {
     logger.warn(`[Moviesda] searchTitle error: ${err.message}`);
     return [];
@@ -136,33 +154,31 @@ async function searchTitle(title, baseUrl) {
 }
 
 /**
- * Scrape the year category page (e.g. /tamil-2026-movies/) and return movie
- * entries that match the given title.
- * Used as a fallback when search returns no useful movie-page results.
- * @param {string} title - Movie title to look for
- * @param {number} year - Release year
- * @param {string} baseUrl
- * @returns {Promise<Array<{title, href}>>}
+ * Scrape the year category listing page and return all movie entries.
+ * e.g. /tamil-2026-movies/ → [{title, href}]
  */
 async function searchInYearListing(title, year, baseUrl) {
   try {
     const categoryUrl = `${baseUrl}/tamil-${year}-movies/`;
-    logger.debug(`[Moviesda] Falling back to year listing: ${categoryUrl}`);
+    logger.debug(`[Moviesda] Trying year listing: ${categoryUrl}`);
     const html = await fetchHtml(categoryUrl);
     const $ = cheerio.load(html);
 
     const results = [];
-    $('main .f a, main .folder a').each((_, el) => {
+    $('main .f a, main .folder a, main a').each((_, el) => {
       const href = $(el).attr('href');
       const text = $(el).text().trim();
-      if (!href || !text || href.includes('/download/')) return;
+      if (!href || !text || text.length < 3) return;
       const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
-      if (!isMoviePage(fullHref)) return;
       results.push({ title: text, href: fullHref });
     });
 
-    logger.debug(`[Moviesda] Year listing found ${results.length} movies`);
-    return results;
+    // Deduplicate
+    const seen = new Set();
+    const unique = results.filter((r) => { if (seen.has(r.href)) return false; seen.add(r.href); return true; });
+
+    logger.debug(`[Moviesda] Year listing found ${unique.length} entries`);
+    return unique;
   } catch (err) {
     logger.warn(`[Moviesda] searchInYearListing error: ${err.message}`);
     return [];
@@ -170,34 +186,77 @@ async function searchInYearListing(title, year, baseUrl) {
 }
 
 /**
- * Find the best matching search result for a given title.
- * Heavily favors results where the movie title's primary word(s) appear
- * and heavily penalizes generic category/listing pages.
- * @param {Array<{title, href}>} results
- * @param {string} query - The original movie title (without year)
- * @returns {{title, href}|null}
+ * Try to construct the download info URL directly from title slug + quality.
+ * moviesda33.com/download/{title}-{year}-original-{quality}/
+ * Returns a list of URLs that actually exist (200 response).
+ */
+async function tryDirectSlugUrls(title, year, baseUrl) {
+  const slug = slugify(title);
+  const qualitySuffixes = [
+    'original-1080p-hd',
+    'original-720p-hd',
+    'hdrip-1080p',
+    'hdrip-720p',
+    'original-480p-hd',
+    'original-4k-uhd',
+  ];
+
+  const found = [];
+  for (const quality of qualitySuffixes) {
+    const url = `${baseUrl}/download/${slug}-${year}-${quality}/`;
+    try {
+      const html = await fetchHtml(url, { timeout: 8000 });
+      const $ = cheerio.load(html);
+      // Valid download info pages have "Download Information" or file name fields
+      const hasContent = $('h2:contains("Download"), .download-info, strong:contains("File Name")').length > 0
+        || html.includes('File Name') || html.includes('Download Server');
+      if (hasContent) {
+        // Derive a human label from the quality suffix
+        const label = quality
+          .replace('original-', '')
+          .replace('-hd', ' HD')
+          .replace('-uhd', ' UHD')
+          .replace('hdrip-', 'HDRip ')
+          .toUpperCase();
+        found.push({ title: `${title} (${label})`, href: url });
+        logger.debug(`[Moviesda] Direct slug hit: ${url}`);
+      }
+    } catch (err) {
+      // 404 or timeout — this quality doesn't exist, skip
+    }
+  }
+  return found;
+}
+
+// ─── Best Match ───────────────────────────────────────────────────────────────
+
+/**
+ * Score and return the best matching result for a given title query.
  */
 function bestMatch(results, query) {
   if (!results.length) return null;
 
-  // The first word(s) of the title are most distinctive (e.g. "Blast" from "Blast 2026")
-  const titleWords = query.toLowerCase().replace(/\d{4}/, '').trim().split(/\s+/).filter(Boolean);
+  // Strip year — title words are more distinctive
+  const titleWords = query.toLowerCase().replace(/\d{4}/g, '').trim().split(/\s+/).filter(Boolean);
 
   const scored = results.map((r) => {
     const rLower = r.title.toLowerCase();
     const hrefLower = r.href.toLowerCase();
 
-    // Must contain the primary title word(s) to score at all
+    // Must contain primary title word(s) to score at all
     const titleWordMatches = titleWords.filter((w) => rLower.includes(w) || hrefLower.includes(w));
     if (titleWordMatches.length === 0) return { ...r, score: -1 };
 
     let score = titleWordMatches.length * 10;
 
-    // Bonus: href slug contains the exact title slugified
+    // Bonus: href slug contains exact title
     const slug = titleWords.join('-');
     if (hrefLower.includes(slug)) score += 20;
 
-    // Bonus: result title starts with the movie name (not a category label)
+    // Bonus: download info page (direct match)
+    if (isDownloadInfoPage(r.href)) score += 15;
+
+    // Bonus: result title starts with the movie name
     if (rLower.startsWith(titleWords[0])) score += 10;
 
     return { ...r, score };
@@ -208,13 +267,11 @@ function bestMatch(results, query) {
   return best.score > 0 ? best : null;
 }
 
+// ─── Quality & File Resolution ────────────────────────────────────────────────
+
 /**
- * Parse a movie page to extract quality links.
- * e.g. "Blast (Original)" → [{label: 'Blast (Original)', href}]
- *      then inside Original: [{label: '360p HD', href}, {label: '720p HD'}, ...]
- * @param {string} moviePageUrl
- * @param {string} baseUrl
- * @returns {Promise<Array<{label: string, href: string}>>}
+ * Parse a movie index page to extract quality links.
+ * These are the sub-folder links like "Original 1080p HD", "Original 720p HD".
  */
 async function resolveQualityOptions(moviePageUrl, baseUrl) {
   try {
@@ -231,7 +288,7 @@ async function resolveQualityOptions(moviePageUrl, baseUrl) {
       }
     });
 
-    logger.debug(`[Moviesda] Quality options for ${moviePageUrl}: ${options.map(o => o.label).join(', ')}`);
+    logger.debug(`[Moviesda] Quality options at ${moviePageUrl}: ${options.map((o) => o.label).join(', ')}`);
     return options;
   } catch (err) {
     logger.warn(`[Moviesda] resolveQualityOptions error: ${err.message}`);
@@ -240,11 +297,98 @@ async function resolveQualityOptions(moviePageUrl, baseUrl) {
 }
 
 /**
- * Parse a quality sub-page to get file download entries.
- * e.g. on the 1080p page: [{name, size, format, thumb, downloadHref}]
- * @param {string} qualityPageUrl
- * @param {string} baseUrl
- * @returns {Promise<Array<{name, size, format, thumb, downloadHref}>>}
+ * Parse a "Download Information" page (moviesda33.com/download/{slug}/).
+ *
+ * This layout shows:
+ *   <img> thumbnail
+ *   File Name: ...
+ *   File Size: 1.46 GB
+ *   Duration: 02:32:21 min
+ *   Video Resolution: 1280×532
+ *   Download Format: Mp4
+ *   Added On: 12 June 2026
+ *   Download Server 1  (link)
+ *   Download Server 2  (link)
+ *
+ * Returns [{name, size, duration, resolution, format, thumb, downloadServerUrls[]}]
+ */
+async function resolveDownloadInfoPage(pageUrl, baseUrl) {
+  try {
+    const html = await fetchHtml(pageUrl);
+    const $ = cheerio.load(html);
+
+    // Extract metadata from <strong> label → next text node pattern
+    function extractMeta(label) {
+      // Try <strong>Label:</strong> text pattern
+      let val = '';
+      $('strong').each((_, el) => {
+        const t = $(el).text().trim();
+        if (t.toLowerCase().includes(label.toLowerCase())) {
+          // Text is in the parent <p> after the <strong>
+          const parent = $(el).parent();
+          const raw = parent.text();
+          const after = raw.substring(raw.indexOf(t) + t.length).trim().replace(/^:?\s*/, '');
+          if (after) val = after;
+        }
+      });
+      // Also try searching in all text
+      if (!val) {
+        $('p, li, td').each((_, el) => {
+          const t = $(el).text();
+          const re = new RegExp(`${label}\\s*:?\\s*(.+)`, 'i');
+          const m = t.match(re);
+          if (m) { val = m[1].split('\n')[0].trim(); return false; }
+        });
+      }
+      return val;
+    }
+
+    const name = extractMeta('File Name') || extractMeta('filename');
+    const size = extractMeta('File Size') || extractMeta('filesize');
+    const duration = extractMeta('Duration');
+    const resolution = extractMeta('Video Resolution') || extractMeta('Resolution');
+    const format = extractMeta('Download Format') || extractMeta('Format') || 'Mp4';
+    const addedOn = extractMeta('Added On') || extractMeta('Added');
+
+    // Thumbnail
+    const thumb = (() => {
+      const src = $('img').first().attr('src') || '';
+      return src.startsWith('http') ? src : src ? `${baseUrl}${src}` : '';
+    })();
+
+    // Download server links — "Download Server 1", "Download Server 2", etc.
+    const serverLinks = [];
+    $('a').each((_, el) => {
+      const text = $(el).text().trim();
+      const href = $(el).attr('href') || '';
+      // Match "Download Server N" or external relay links
+      if (/download\s*server\s*\d*/i.test(text) || /moviespage\.xyz|downloadpage\.xyz/i.test(href)) {
+        const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
+        if (fullHref && !serverLinks.includes(fullHref)) serverLinks.push(fullHref);
+      }
+    });
+
+    logger.debug(`[Moviesda] Download info page: name="${name}" size="${size}" servers=${serverLinks.length}`);
+
+    return {
+      name: name || 'Movie File',
+      size,
+      duration,
+      resolution,
+      format,
+      addedOn,
+      thumb,
+      serverLinks,
+    };
+  } catch (err) {
+    logger.warn(`[Moviesda] resolveDownloadInfoPage error for ${pageUrl}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Legacy: Parse a quality sub-page to get file download entries (old .mv-content format).
+ * Kept as fallback for older site layouts.
  */
 async function resolveFileList(qualityPageUrl, baseUrl) {
   try {
@@ -252,8 +396,28 @@ async function resolveFileList(qualityPageUrl, baseUrl) {
     const $ = cheerio.load(html);
 
     const files = [];
+
+    // New format: "Download Information" single-file page
+    if (html.includes('File Name') || html.includes('Download Server')) {
+      const info = await resolveDownloadInfoPage(qualityPageUrl, baseUrl);
+      if (info) {
+        files.push({
+          name: info.name,
+          size: info.size,
+          format: info.format,
+          thumb: info.thumb,
+          duration: info.duration,
+          resolution: info.resolution,
+          downloadHref: qualityPageUrl, // The page itself is the download info page
+          serverLinks: info.serverLinks,
+        });
+      }
+      return files;
+    }
+
+    // Old format: .mv-content divs with multiple files
     $('main .mv-content, main .folder .mv-content').each((_, el) => {
-      const linkEl = $(el).find('a[href*="/download/"]').first();
+      const linkEl = $(el).find('a').first();
       const href = linkEl.attr('href');
       if (!href) return;
 
@@ -269,11 +433,10 @@ async function resolveFileList(qualityPageUrl, baseUrl) {
 
       const thumb = $(el).find('img').first().attr('src') || '';
       const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
-
-      files.push({ name, size, format, thumb: thumb.startsWith('http') ? thumb : `${baseUrl}${thumb}`, downloadHref: fullHref });
+      files.push({ name, size, format, thumb: thumb.startsWith('http') ? thumb : `${baseUrl}${thumb}`, downloadHref: fullHref, serverLinks: [] });
     });
 
-    logger.debug(`[Moviesda] File list for ${qualityPageUrl}: ${files.length} files`);
+    logger.debug(`[Moviesda] File list at ${qualityPageUrl}: ${files.length} files`);
     return files;
   } catch (err) {
     logger.warn(`[Moviesda] resolveFileList error: ${err.message}`);
@@ -281,129 +444,118 @@ async function resolveFileList(qualityPageUrl, baseUrl) {
   }
 }
 
+// ─── CDN Link Resolution ──────────────────────────────────────────────────────
+
 /**
- * Follow the moviesda download page to get the CDN relay URL.
- * moviesda33.com/download/{slug}/ → download.moviespage.xyz/download/file/{id}
- * @param {string} downloadPageUrl
- * @returns {Promise<string|null>} CDN relay URL
+ * Follow a "Download Server" relay link to get the next hop URL.
+ * Supports moviespage.xyz, downloadpage.xyz style relays.
  */
-async function resolveDownloadRelay(downloadPageUrl) {
-  try {
-    const html = await fetchHtml(downloadPageUrl);
-    const $ = cheerio.load(html);
+async function resolveRelayChain(relayUrl) {
+  // Cap the chain at 3 hops to avoid infinite loops
+  let currentUrl = relayUrl;
+  let downloadUrl = null;
+  let watchUrl = null;
 
-    let relayUrl = null;
-    // Download link is inside div.dlink > a
-    $('div.dlink a, div.download a').each((_, el) => {
-      const href = $(el).attr('href');
-      if (href && href.includes('moviespage.xyz')) {
-        relayUrl = href;
-        return false; // break
+  for (let hop = 0; hop < 3; hop++) {
+    try {
+      const html = await fetchHtml(currentUrl, { timeout: 10000 });
+      const $ = cheerio.load(html);
+
+      // Check for direct video source (onestream player page)
+      const videoSrc = $('video source').first().attr('src')
+        || $('video').first().attr('src');
+      if (videoSrc) {
+        downloadUrl = videoSrc.startsWith('http') ? videoSrc : null;
+        // The current URL is the watch page
+        watchUrl = currentUrl;
+        break;
       }
-    });
 
-    logger.debug(`[Moviesda] Relay URL: ${relayUrl}`);
-    return relayUrl;
-  } catch (err) {
-    logger.warn(`[Moviesda] resolveDownloadRelay error: ${err.message}`);
-    return null;
+      // Look for next relay link
+      let nextUrl = null;
+      $('div.dlink a, div.download a, a.btn, a').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const text = $(el).text().toLowerCase();
+        if (!nextUrl && (
+          href.includes('cdnserver') ||
+          href.endsWith('.mp4') ||
+          href.includes('moviespage.xyz') ||
+          href.includes('downloadpage.xyz') ||
+          href.includes('onestream')
+        )) {
+          nextUrl = href;
+        }
+        if (!watchUrl && (text.includes('watch') || text.includes('online'))) {
+          watchUrl = href;
+        }
+      });
+
+      if (!nextUrl) break;
+
+      if (nextUrl.includes('cdnserver') || nextUrl.endsWith('.mp4')) {
+        downloadUrl = nextUrl;
+        break;
+      }
+
+      currentUrl = nextUrl.startsWith('http') ? nextUrl : null;
+      if (!currentUrl) break;
+    } catch (err) {
+      logger.debug(`[Moviesda] Relay hop ${hop} failed for ${currentUrl}: ${err.message}`);
+      break;
+    }
   }
+
+  logger.debug(`[Moviesda] Relay chain result: download=${downloadUrl} watch=${watchUrl}`);
+  return { downloadUrl, watchUrl };
 }
 
-/**
- * Follow the moviespage.xyz relay to get the downloadpage.xyz URL.
- * download.moviespage.xyz/download/file/{id} → movies.downloadpage.xyz/download/page/{id}
- * @param {string} relayUrl
- * @returns {Promise<string|null>}
- */
-async function resolveDownloadPage(relayUrl) {
-  try {
-    const html = await fetchHtml(relayUrl);
-    const $ = cheerio.load(html);
-
-    let pageUrl = null;
-    $('div.dlink a, div.download a').each((_, el) => {
-      const href = $(el).attr('href');
-      if (href && (href.includes('downloadpage.xyz') || href.includes('cdnserver'))) {
-        pageUrl = href;
-        return false;
-      }
-    });
-
-    logger.debug(`[Moviesda] Download page URL: ${pageUrl}`);
-    return pageUrl;
-  } catch (err) {
-    logger.warn(`[Moviesda] resolveDownloadPage error: ${err.message}`);
-    return null;
-  }
-}
+// ─── Full Pipeline ────────────────────────────────────────────────────────────
 
 /**
- * Resolve the final direct MP4 link and optional watch-online URL.
- * movies.downloadpage.xyz/download/page/{id} → {downloadUrl, watchUrl}
- * @param {string} pageUrl
- * @returns {Promise<{downloadUrl: string|null, watchUrl: string|null}>}
- */
-async function resolveFinalLinks(pageUrl) {
-  try {
-    const html = await fetchHtml(pageUrl);
-    const $ = cheerio.load(html);
-
-    let downloadUrl = null;
-    let watchUrl = null;
-
-    $('div.dlink a, div.download a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const text = $(el).text().toLowerCase();
-      if (!downloadUrl && (href.includes('cdnserver') || href.endsWith('.mp4'))) {
-        downloadUrl = href;
-      }
-      if (!watchUrl && (text.includes('watch') || href.includes('onestream') || href.includes('stream'))) {
-        watchUrl = href;
-      }
-    });
-
-    logger.debug(`[Moviesda] Final links: download=${downloadUrl} watch=${watchUrl}`);
-    return { downloadUrl, watchUrl };
-  } catch (err) {
-    logger.warn(`[Moviesda] resolveFinalLinks error: ${err.message}`);
-    return { downloadUrl: null, watchUrl: null };
-  }
-}
-
-/**
- * Full pipeline: given a movie title, resolve all download links across all qualities.
+ * Full pipeline: given a movie title, resolve all quality download links.
  *
- * @param {string} title - Movie title to search for
- * @param {number} [year] - Optional year to narrow results
- * @returns {Promise<{
- *   found: boolean,
- *   title: string,
- *   qualities: Array<{
- *     label: string,
- *     files: Array<{name, size, format, thumb, downloadUrl, watchUrl}>
- *   }>
- * }>}
+ * Strategy (in order):
+ *  1. Direct search form (/?s=title)
+ *  2. Year listing page (/tamil-{year}-movies/)
+ *  3. Direct slug URL construction (/download/{slug}-{year}-original-{quality}/)
+ *
+ * @param {string} title - Movie title
+ * @param {number} [year] - Release year
  */
 async function getDownloadLinks(title, year = null) {
-  const query = year ? `${title} ${year}` : title;
-
   let baseUrl;
   try {
     baseUrl = await getWorkingDomain();
   } catch (err) {
-    logger.error(`[Moviesda] No working domain found: ${err.message}`);
+    logger.error(`[Moviesda] No working domain: ${err.message}`);
     return { found: false, title, qualities: [] };
   }
 
-  // Step 1: Search for movie — use direct search first, then fallback to year listing
+  // ── Step 1: Search form ──────────────────────────────────────────────────
   let searchResults = await searchTitle(title, baseUrl);
   let match = bestMatch(searchResults, title);
 
+  // ── Step 2: Year listing fallback ────────────────────────────────────────
   if (!match && year) {
-    logger.info(`[Moviesda] Direct search returned no movie pages. Trying year listing for ${year}...`);
+    logger.info(`[Moviesda] Search returned no match. Trying year listing for ${year}...`);
     const yearResults = await searchInYearListing(title, year, baseUrl);
     match = bestMatch(yearResults, title);
+  }
+
+  // ── Step 3: Direct slug construction fallback ────────────────────────────
+  if (!match && year) {
+    logger.info(`[Moviesda] Year listing returned no match. Trying direct slug construction...`);
+    const slugResults = await tryDirectSlugUrls(title, year, baseUrl);
+    if (slugResults.length > 0) {
+      // Direct slug results are already quality pages — process them directly
+      const qualities = await resolveQualityResults(slugResults, baseUrl);
+      return {
+        found: qualities.length > 0,
+        title: slugResults[0].title.split(' (')[0],
+        matchedUrl: slugResults[0].href,
+        qualities,
+      };
+    }
   }
 
   if (!match) {
@@ -413,39 +565,24 @@ async function getDownloadLinks(title, year = null) {
 
   logger.info(`[Moviesda] Best match: "${match.title}" → ${match.href}`);
 
+  // ── Step 4: Determine page type and resolve qualities ────────────────────
+  let qualityPages = [];
 
-  // Step 2: Get quality options from the movie page
-  let qualityOptions = await resolveQualityOptions(match.href, baseUrl);
-
-  // If still no quality options found, we may be already on a quality page — treat it as one
-  if (!qualityOptions.length) {
-    logger.warn(`[Moviesda] No quality sub-options, treating ${match.href} as direct quality page`);
-    qualityOptions = [{ label: match.title, href: match.href }];
-  }
-
-  // Step 3: For each quality, resolve file list and then CDN links
-  const qualities = [];
-
-  for (const quality of qualityOptions) {
-    // Determine if this is a quality-variant page (has 360p/720p/1080p links)
-    // or a direct file list page
-    const fileList = await resolveFileList(quality.href, baseUrl);
-
-    if (!fileList.length) {
-      // This might itself be a sub-folder with quality options — recurse one level
-      const subOptions = await resolveQualityOptions(quality.href, baseUrl);
-      for (const sub of subOptions) {
-        const subFiles = await resolveFileList(sub.href, baseUrl);
-        if (subFiles.length) {
-          const resolvedFiles = await resolveFilesLinks(subFiles);
-          qualities.push({ label: sub.label, files: resolvedFiles });
-        }
-      }
+  if (isDownloadInfoPage(match.href)) {
+    // Already a download info page — treat it as a single-quality entry
+    qualityPages = [{ label: deriveQualityLabel(match.href), href: match.href }];
+  } else {
+    // Movie index page — extract quality sub-links
+    const options = await resolveQualityOptions(match.href, baseUrl);
+    if (options.length > 0) {
+      qualityPages = options;
     } else {
-      const resolvedFiles = await resolveFilesLinks(fileList);
-      qualities.push({ label: quality.label, files: resolvedFiles });
+      // Fallback: treat the match page itself as a quality page
+      qualityPages = [{ label: match.title, href: match.href }];
     }
   }
+
+  const qualities = await resolveQualityResults(qualityPages, baseUrl);
 
   return {
     found: qualities.length > 0,
@@ -456,41 +593,103 @@ async function getDownloadLinks(title, year = null) {
 }
 
 /**
- * Helper: follow the download chain for each file and attach final URLs.
- * @param {Array} files
- * @returns {Promise<Array>}
+ * Derive a human-readable quality label from a URL slug.
+ * e.g. /download/karuppu-2026-original-720p-hd/ → "720p HD"
  */
-async function resolveFilesLinks(files) {
-  const resolved = [];
-  for (const file of files) {
-    let downloadUrl = null;
-    let watchUrl = null;
+function deriveQualityLabel(href) {
+  const m = href.match(/(\d{3,4}p(?:-hd)?|-hd|-4k|-uhd)/i);
+  if (m) return m[0].toUpperCase().replace('-', ' ');
+  if (/1080/i.test(href)) return '1080p HD';
+  if (/720/i.test(href)) return '720p HD';
+  if (/480/i.test(href)) return '480p';
+  if (/4k|uhd/i.test(href)) return '4K UHD';
+  return 'Original';
+}
+
+/**
+ * Process quality pages into the final {label, files} structure.
+ */
+async function resolveQualityResults(qualityPages, baseUrl) {
+  const qualities = [];
+
+  for (const qPage of qualityPages) {
     try {
-      const relayUrl = await resolveDownloadRelay(file.downloadHref);
-      if (relayUrl) {
-        const pageUrl = await resolveDownloadPage(relayUrl);
-        if (pageUrl) {
-          const links = await resolveFinalLinks(pageUrl);
-          downloadUrl = links.downloadUrl;
-          watchUrl = links.watchUrl;
+      let files = [];
+
+      if (isDownloadInfoPage(qPage.href)) {
+        // This is already a download info page — parse it directly
+        const info = await resolveDownloadInfoPage(qPage.href, baseUrl);
+        if (info) {
+          // Resolve CDN links from server links
+          let downloadUrl = null;
+          let watchUrl = null;
+
+          for (const serverLink of (info.serverLinks || [])) {
+            if (downloadUrl) break;
+            const links = await resolveRelayChain(serverLink);
+            if (links.downloadUrl) downloadUrl = links.downloadUrl;
+            if (links.watchUrl) watchUrl = links.watchUrl;
+          }
+
+          files.push({
+            name: info.name,
+            size: info.size,
+            duration: info.duration,
+            resolution: info.resolution,
+            format: info.format,
+            thumb: info.thumb,
+            downloadUrl,
+            watchUrl: watchUrl || (info.serverLinks[0] || null),
+          });
+        }
+      } else {
+        // Try to get sub-files from a quality sub-page
+        const fileList = await resolveFileList(qPage.href, baseUrl);
+
+        for (const file of fileList) {
+          let downloadUrl = null;
+          let watchUrl = null;
+
+          // If file already has serverLinks from resolveDownloadInfoPage
+          for (const serverLink of (file.serverLinks || [])) {
+            if (downloadUrl) break;
+            const links = await resolveRelayChain(serverLink);
+            if (links.downloadUrl) downloadUrl = links.downloadUrl;
+            if (links.watchUrl) watchUrl = links.watchUrl;
+          }
+
+          // Legacy: file has downloadHref — follow it
+          if (!downloadUrl && file.downloadHref && file.downloadHref !== qPage.href) {
+            const links = await resolveRelayChain(file.downloadHref);
+            downloadUrl = links.downloadUrl;
+            watchUrl = links.watchUrl;
+          }
+
+          files.push({ ...file, downloadUrl, watchUrl });
         }
       }
+
+      if (files.length > 0) {
+        qualities.push({ label: deriveQualityLabel(qPage.href) || qPage.label, files });
+      }
     } catch (err) {
-      logger.warn(`[Moviesda] resolveFilesLinks error for ${file.name}: ${err.message}`);
+      logger.warn(`[Moviesda] resolveQualityResults error for ${qPage.href}: ${err.message}`);
     }
-    resolved.push({ ...file, downloadUrl, watchUrl });
   }
-  return resolved;
+
+  return qualities;
 }
+
+// ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
   getDownloadLinks,
   searchTitle,
   searchInYearListing,
+  tryDirectSlugUrls,
   resolveQualityOptions,
+  resolveDownloadInfoPage,
   resolveFileList,
-  resolveDownloadRelay,
-  resolveDownloadPage,
-  resolveFinalLinks,
+  resolveRelayChain,
   getWorkingDomain,
 };
