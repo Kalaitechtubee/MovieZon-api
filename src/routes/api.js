@@ -30,6 +30,10 @@ router.get('/v2/stream/auto/:tmdbId', apiController.resolveStreamAuto);
 // Explicit provider stream (for user-initiated manual server switching).
 router.get('/v2/stream/:provider/:id', apiController.stream);
 
+// ─── Download Routes (alias stream resolvers to reuse provider resolution pipeline) ───
+router.get('/v2/download/auto/:tmdbId', apiController.resolveStream);
+router.get('/v2/download/:provider/:id', apiController.stream);
+
 router.get('/v2/tmdb/:category', apiController.tmdbList);
 router.get('/v2/tmdb/season/:tmdbId/:seasonNumber', apiController.seasonEpisodes);
 router.get('/v2/stream/proxy', apiController.proxyStream);

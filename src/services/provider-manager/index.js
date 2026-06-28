@@ -229,6 +229,7 @@ class ProviderManager {
         status: status,
         languages: audioLangs,
         streamType: provider.name === 'peachify' ? 'embed' : 'hls',
+        downloadSupported: provider.name !== 'peachify',
         embedUrl: providerEmbedUrl,
         embedFallbacks: providerEmbedFallbacks,
         variants: []
@@ -251,7 +252,7 @@ class ProviderManager {
       supportedAudio: audioLangs,
       supportedSubtitles: [],
       supportedQualities: [],
-      downloadAvailable: false,
+      downloadAvailable: sources.some(s => s.available && s.downloadSupported),
 
       // Structured API contract fields
       player: {
@@ -262,7 +263,7 @@ class ProviderManager {
         embedFallbacks: primaryEmbedFallbacks
       },
       download: {
-        available: false,
+        available: sources.some(s => s.available && s.downloadSupported),
         qualities: []
       }
     };
