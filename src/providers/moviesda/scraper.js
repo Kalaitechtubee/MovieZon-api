@@ -77,8 +77,31 @@ async function getWorkingDomain() {
 }
 
 /**
+ * Patterns that identify category/listing pages, not individual movie pages.
+ * These should be excluded from search results.
+ */
+const CATEGORY_URL_PATTERNS = [
+  /-movies\//,          // /tamil-2026-movies/
+  /\/tamil-movies\//,   // /tamil-movies/a/
+  /\/hindi-movies\//,
+  /\/dubbed-movies\//,
+  /\/category\//,
+  /\/tag\//,
+  /\/page\//,
+  /\/\d{4}\//,          // /2026/
+  /\/[a-z]\//,          // /a/ /b/ etc (alphabetical listing)
+];
+
+/**
+ * Returns true if the URL looks like an individual movie detail page.
+ */
+function isMoviePage(href) {
+  return !CATEGORY_URL_PATTERNS.some((re) => re.test(href));
+}
+
+/**
  * Search for a movie title on the Moviesda search form.
- * Returns an array of { title, href } results.
+ * Returns an array of { title, href } results — only individual movie pages.
  * @param {string} title
  * @param {string} baseUrl
  * @returns {Promise<Array<{title: string, href: string}>>}
@@ -94,13 +117,17 @@ async function searchTitle(title, baseUrl) {
     $('main .f a, main .folder a, main a[href*="-movie"]').each((_, el) => {
       const href = $(el).attr('href');
       const text = $(el).text().trim();
-      if (href && text && !href.includes('download')) {
-        const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
-        results.push({ title: text, href: fullHref });
-      }
+      if (!href || !text) return;
+      if (href.includes('/download/')) return;
+      const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
+
+      // Only include individual movie pages, not category/year listing pages
+      if (!isMoviePage(fullHref)) return;
+
+      results.push({ title: text, href: fullHref });
     });
 
-    logger.debug(`[Moviesda] Search for "${title}" → ${results.length} results`);
+    logger.debug(`[Moviesda] Search for "${title}" → ${results.length} movie-page results`);
     return results;
   } catch (err) {
     logger.warn(`[Moviesda] searchTitle error: ${err.message}`);
@@ -109,22 +136,76 @@ async function searchTitle(title, baseUrl) {
 }
 
 /**
+ * Scrape the year category page (e.g. /tamil-2026-movies/) and return movie
+ * entries that match the given title.
+ * Used as a fallback when search returns no useful movie-page results.
+ * @param {string} title - Movie title to look for
+ * @param {number} year - Release year
+ * @param {string} baseUrl
+ * @returns {Promise<Array<{title, href}>>}
+ */
+async function searchInYearListing(title, year, baseUrl) {
+  try {
+    const categoryUrl = `${baseUrl}/tamil-${year}-movies/`;
+    logger.debug(`[Moviesda] Falling back to year listing: ${categoryUrl}`);
+    const html = await fetchHtml(categoryUrl);
+    const $ = cheerio.load(html);
+
+    const results = [];
+    $('main .f a, main .folder a').each((_, el) => {
+      const href = $(el).attr('href');
+      const text = $(el).text().trim();
+      if (!href || !text || href.includes('/download/')) return;
+      const fullHref = href.startsWith('http') ? href : `${baseUrl}${href}`;
+      if (!isMoviePage(fullHref)) return;
+      results.push({ title: text, href: fullHref });
+    });
+
+    logger.debug(`[Moviesda] Year listing found ${results.length} movies`);
+    return results;
+  } catch (err) {
+    logger.warn(`[Moviesda] searchInYearListing error: ${err.message}`);
+    return [];
+  }
+}
+
+/**
  * Find the best matching search result for a given title.
+ * Heavily favors results where the movie title's primary word(s) appear
+ * and heavily penalizes generic category/listing pages.
  * @param {Array<{title, href}>} results
- * @param {string} query
+ * @param {string} query - The original movie title (without year)
  * @returns {{title, href}|null}
  */
 function bestMatch(results, query) {
   if (!results.length) return null;
-  const qWords = query.toLowerCase().split(/\s+/);
-  // Score by how many query words appear in the result title
+
+  // The first word(s) of the title are most distinctive (e.g. "Blast" from "Blast 2026")
+  const titleWords = query.toLowerCase().replace(/\d{4}/, '').trim().split(/\s+/).filter(Boolean);
+
   const scored = results.map((r) => {
     const rLower = r.title.toLowerCase();
-    const score = qWords.filter((w) => rLower.includes(w)).length;
+    const hrefLower = r.href.toLowerCase();
+
+    // Must contain the primary title word(s) to score at all
+    const titleWordMatches = titleWords.filter((w) => rLower.includes(w) || hrefLower.includes(w));
+    if (titleWordMatches.length === 0) return { ...r, score: -1 };
+
+    let score = titleWordMatches.length * 10;
+
+    // Bonus: href slug contains the exact title slugified
+    const slug = titleWords.join('-');
+    if (hrefLower.includes(slug)) score += 20;
+
+    // Bonus: result title starts with the movie name (not a category label)
+    if (rLower.startsWith(titleWords[0])) score += 10;
+
     return { ...r, score };
   });
+
   scored.sort((a, b) => b.score - a.score);
-  return scored[0].score > 0 ? scored[0] : results[0];
+  const best = scored[0];
+  return best.score > 0 ? best : null;
 }
 
 /**
@@ -315,16 +396,23 @@ async function getDownloadLinks(title, year = null) {
     return { found: false, title, qualities: [] };
   }
 
-  // Step 1: Search for movie
-  const searchResults = await searchTitle(query, baseUrl);
-  const match = bestMatch(searchResults, query);
+  // Step 1: Search for movie — use direct search first, then fallback to year listing
+  let searchResults = await searchTitle(title, baseUrl);
+  let match = bestMatch(searchResults, title);
+
+  if (!match && year) {
+    logger.info(`[Moviesda] Direct search returned no movie pages. Trying year listing for ${year}...`);
+    const yearResults = await searchInYearListing(title, year, baseUrl);
+    match = bestMatch(yearResults, title);
+  }
 
   if (!match) {
-    logger.info(`[Moviesda] No match found for "${query}"`);
+    logger.info(`[Moviesda] No match found for "${title}" year=${year}`);
     return { found: false, title, qualities: [] };
   }
 
   logger.info(`[Moviesda] Best match: "${match.title}" → ${match.href}`);
+
 
   // Step 2: Get quality options from the movie page
   let qualityOptions = await resolveQualityOptions(match.href, baseUrl);
@@ -398,6 +486,7 @@ async function resolveFilesLinks(files) {
 module.exports = {
   getDownloadLinks,
   searchTitle,
+  searchInYearListing,
   resolveQualityOptions,
   resolveFileList,
   resolveDownloadRelay,
