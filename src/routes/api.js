@@ -2,6 +2,8 @@ const express = require('express');
 const apiController = require('../controllers/apiController');
 const historyController = require('../controllers/historyController');
 const moviesdaRouter = require('./moviesda');
+const movieswoodRouter = require('./movieswood');
+
 
 const router = express.Router();
 
@@ -38,8 +40,9 @@ router.get('/v2/tmdb/:category', apiController.tmdbList);
 router.get('/v2/tmdb/season/:tmdbId/:seasonNumber', apiController.seasonEpisodes);
 router.get('/v2/stream/proxy', apiController.proxyStream);
 
-// ─── Moviesda Download Routes ────────────────────────────────────────────────
+// ─── Moviesda/Movieswood Download Routes ──────────────────────────────────────
 router.use('/moviesda', moviesdaRouter);
+router.use('/movieswood', movieswoodRouter);
 
 // ─── Watch History Routes ─────────────────────────────────────────────────────
 router.get('/v2/history', historyController.getHistory);
